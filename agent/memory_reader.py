@@ -10,13 +10,13 @@ class StatusCondition(IntFlag):
     BURN = 0b10000  # Bit 4
     FREEZE = 0b100000  # Bit 5
     PARALYSIS = 0b1000000  # Bit 6
-    
+
     @property
     def is_asleep(self) -> bool:
         """Check if the Pokémon is asleep (any value in bits 0-2)"""
         # For sleep, we directly check if any bits in positions 0-2 are set (values 1-7)
         return bool(int(self) & 0b111)
-    
+
     def get_status_name(self) -> str:
         """Get a human-readable status name"""
         if self.is_asleep:
@@ -705,12 +705,12 @@ class PokemonData:
     trainer_id: int
     nickname: str | None = None
     experience: int | None = None
-    
+
     @property
     def is_asleep(self) -> bool:
         """Check if the Pokémon is asleep"""
         return self.status.is_asleep
-        
+
     @property
     def status_name(self) -> str:
         """Return a human-readable status name"""
@@ -948,7 +948,7 @@ class PokemonRedReader:
             except ValueError:
                 continue
             status_value = self.memory[addr + 4]
-            
+
             pokemon = PokemonData(
                 species_id=self.memory[addr],
                 species_name=species_name,

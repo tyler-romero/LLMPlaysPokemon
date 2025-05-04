@@ -1,16 +1,17 @@
 import base64
 import copy
 import io
+import json
 import logging
 import os
 
-from config import MAX_TOKENS, MODEL_NAME, TEMPERATURE, USE_NAVIGATOR
+from openai import OpenAI
 
 from agent.emulator import Emulator
-from anthropic import Anthropic
+from config import MAX_TOKENS, MODEL_NAME, TEMPERATURE, USE_NAVIGATOR
 
 # Set up logging
-logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -49,48 +50,67 @@ The summary should be comprehensive enough that you can continue gameplay withou
 
 AVAILABLE_TOOLS = [
     {
-        "name": "press_buttons",
-        "description": "Press a sequence of buttons on the Game Boy.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "buttons": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "enum": ["a", "b", "start", "select", "up", "down", "left", "right"]
+        "type": "function",
+        "function": {
+            "name": "press_buttons",
+            "description": "Press a sequence of buttons on the Game Boy.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "buttons": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "a",
+                                "b",
+                                "start",
+                                "select",
+                                "up",
+                                "down",
+                                "left",
+                                "right",
+                            ],
+                        },
+                        "description": "List of buttons to press in sequence. Valid buttons: 'a', 'b', 'start', 'select', 'up', 'down', 'left', 'right'",
                     },
-                    "description": "List of buttons to press in sequence. Valid buttons: 'a', 'b', 'start', 'select', 'up', 'down', 'left', 'right'"
+                    "wait": {
+                        "type": "boolean",
+                        "description": "Whether to wait for a brief period after pressing each button. Defaults to true.",
+                    },
                 },
-                "wait": {
-                    "type": "boolean",
-                    "description": "Whether to wait for a brief period after pressing each button. Defaults to true."
-                }
+                "required": ["buttons"],
+                "additionalProperties": False,
             },
-            "required": ["buttons"],
         },
     }
 ]
 
 if USE_NAVIGATOR:
-    AVAILABLE_TOOLS.append({
-        "name": "navigate_to",
-        "description": "Automatically navigate to a position on the map grid. The screen is divided into a 9x10 grid, with the top-left corner as (0, 0). This tool is only available in the overworld.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "row": {
-                    "type": "integer",
-                    "description": "The row coordinate to navigate to (0-8)."
+    AVAILABLE_TOOLS.append(
+        {
+            "type": "function",
+            "function": {
+                "name": "navigate_to",
+                "description": "Automatically navigate to a position on the map grid. The screen is divided into a 9x10 grid, with the top-left corner as (0, 0). This tool is only available in the overworld.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "row": {
+                            "type": "integer",
+                            "description": "The row coordinate to navigate to (0-8).",
+                        },
+                        "col": {
+                            "type": "integer",
+                            "description": "The column coordinate to navigate to (0-9).",
+                        },
+                    },
+                    "required": ["row", "col"],
+                    "additionalProperties": False,
                 },
-                "col": {
-                    "type": "integer",
-                    "description": "The column coordinate to navigate to (0-9)."
-                }
             },
-            "required": ["row", "col"],
-        },
-    })
+        }
+    )
 
 
 class SimpleAgent:
@@ -105,7 +125,7 @@ class SimpleAgent:
         """
         self.emulator = Emulator(rom_path, headless, sound)
         self.emulator.initialize()  # Initialize the emulator
-        self.client = Anthropic()
+        self.client = OpenAI()
         self.running = True
         self.message_history = [{"role": "user", "content": "You may now begin playing."}]
         self.max_history = max_history
@@ -115,55 +135,57 @@ class SimpleAgent:
 
     def process_tool_call(self, tool_call):
         """Process a single tool call."""
-        tool_name = tool_call.name
-        tool_input = tool_call.input
+        tool_name = tool_call.function.name
+        tool_input = json.loads(tool_call.function.arguments)
         logger.info(f"Processing tool call: {tool_name}")
 
         if tool_name == "press_buttons":
             buttons = tool_input["buttons"]
             wait = tool_input.get("wait", True)
             logger.info(f"[Buttons] Pressing: {buttons} (wait={wait})")
-            
+
             result = self.emulator.press_buttons(buttons, wait)
-            
+
             # Get a fresh screenshot after executing the buttons
             screenshot = self.emulator.get_screenshot()
             screenshot_b64 = get_screenshot_base64(screenshot, upscale=2)
-            
+
             # Get game state from memory after the action
             memory_info = self.emulator.get_state_from_memory()
-            
+
             # Log the memory state after the tool call
-            logger.info(f"[Memory State after action]")
+            logger.info("[Memory State after action]")
             logger.info(memory_info)
-            
+
             collision_map = self.emulator.get_collision_map()
             if collision_map:
                 logger.info(f"[Collision Map after action]\n{collision_map}")
-            
+
             # Return tool result as a dictionary
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_call.id,
                 "content": [
                     {"type": "text", "text": f"Pressed buttons: {', '.join(buttons)}"},
-                    {"type": "text", "text": "\nHere is a screenshot of the screen after your button presses:"},
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": screenshot_b64,
-                        },
+                        "type": "text",
+                        "text": "\nHere is a screenshot of the screen after your button presses:",
                     },
-                    {"type": "text", "text": f"\nGame state information from memory after your action:\n{memory_info}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                    },
+                    {
+                        "type": "text",
+                        "text": f"\nGame state information from memory after your action:\n{memory_info}",
+                    },
                 ],
             }
         elif tool_name == "navigate_to":
             row = tool_input["row"]
             col = tool_input["col"]
             logger.info(f"[Navigation] Navigating to: ({row}, {col})")
-            
+
             status, path = self.emulator.find_path(row, col)
             if path:
                 for direction in path:
@@ -171,38 +193,40 @@ class SimpleAgent:
                 result = f"Navigation successful: followed path with {len(path)} steps"
             else:
                 result = f"Navigation failed: {status}"
-            
+
             # Get a fresh screenshot after executing the navigation
             screenshot = self.emulator.get_screenshot()
             screenshot_b64 = get_screenshot_base64(screenshot, upscale=2)
-            
+
             # Get game state from memory after the action
             memory_info = self.emulator.get_state_from_memory()
-            
+
             # Log the memory state after the tool call
-            logger.info(f"[Memory State after action]")
+            logger.info("[Memory State after action]")
             logger.info(memory_info)
-            
+
             collision_map = self.emulator.get_collision_map()
             if collision_map:
                 logger.info(f"[Collision Map after action]\n{collision_map}")
-            
+
             # Return tool result as a dictionary
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_call.id,
                 "content": [
                     {"type": "text", "text": f"Navigation result: {result}"},
-                    {"type": "text", "text": "\nHere is a screenshot of the screen after navigation:"},
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": screenshot_b64,
-                        },
+                        "type": "text",
+                        "text": "\nHere is a screenshot of the screen after navigation:",
                     },
-                    {"type": "text", "text": f"\nGame state information from memory after your action:\n{memory_info}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
+                    },
+                    {
+                        "type": "text",
+                        "text": f"\nGame state information from memory after your action:\n{memory_info}",
+                    },
                 ],
             }
         else:
@@ -210,9 +234,7 @@ class SimpleAgent:
             return {
                 "type": "tool_result",
                 "tool_use_id": tool_call.id,
-                "content": [
-                    {"type": "text", "text": f"Error: Unknown tool '{tool_name}'"}
-                ],
+                "content": [{"type": "text", "text": f"Error: Unknown tool '{tool_name}'"}],
             }
 
     def run(self, num_steps=1):
@@ -228,64 +250,97 @@ class SimpleAgent:
             try:
                 messages = copy.deepcopy(self.message_history)
 
+                # Mark screenshots as ephemeral to save context space
                 if len(messages) >= 3:
-                    if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and messages[-1]["content"]:
+                    if (
+                        messages[-1]["role"] == "user"
+                        and isinstance(messages[-1]["content"], list)
+                        and messages[-1]["content"]
+                    ):
                         messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
-                    
-                    if len(messages) >= 5 and messages[-3]["role"] == "user" and isinstance(messages[-3]["content"], list) and messages[-3]["content"]:
+
+                    if (
+                        len(messages) >= 5
+                        and messages[-3]["role"] == "user"
+                        and isinstance(messages[-3]["content"], list)
+                        and messages[-3]["content"]
+                    ):
                         messages[-3]["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
-
                 # Get model response
-                response = self.client.messages.create(
+                logger.info(f"Messages: {messages}")
+                response = self.client.chat.completions.create(
                     model=MODEL_NAME,
                     max_tokens=MAX_TOKENS,
-                    system=SYSTEM_PROMPT,
                     messages=messages,
                     tools=AVAILABLE_TOOLS,
                     temperature=TEMPERATURE,
                 )
 
-                logger.info(f"Response usage: {response.usage}")
+                logger.info(f"Run response usage: {response.usage}")
 
                 # Extract tool calls
-                tool_calls = [
-                    block for block in response.content if block.type == "tool_use"
-                ]
+                tool_calls = []
+                if response.choices and response.choices[0].message.tool_calls:
+                    tool_calls = response.choices[0].message.tool_calls
 
                 # Display the model's reasoning
-                for block in response.content:
-                    if block.type == "text":
-                        logger.info(f"[Text] {block.text}")
-                    elif block.type == "tool_use":
-                        logger.info(f"[Tool] Using tool: {block.name}")
+                if response.choices and response.choices[0].message.content:
+                    logger.info(f"[Text] {response.choices[0].message.content}")
+
+                # Log tool calls if present
+                if tool_calls:
+                    for tool_call in tool_calls:
+                        logger.info(f"[Tool] Using tool: {tool_call.function.name}")
 
                 # Process tool calls
                 if tool_calls:
-                    # Add assistant message to history
-                    assistant_content = []
-                    for block in response.content:
-                        if block.type == "text":
-                            assistant_content.append({"type": "text", "text": block.text})
-                        elif block.type == "tool_use":
-                            assistant_content.append({"type": "tool_use", **dict(block)})
-                    
-                    self.message_history.append(
-                        {"role": "assistant", "content": assistant_content}
-                    )
-                    
-                    # Process tool calls and create tool results
-                    tool_results = []
-                    for tool_call in tool_calls:
-                        tool_result = self.process_tool_call(tool_call)
-                        tool_results.append(tool_result)
-                    
-                    # Add tool results to message history
-                    self.message_history.append(
-                        {"role": "user", "content": tool_results}
-                    )
+                    # 1. Add the assistant message correctly (with potential tool_calls attribute)
+                    assistant_message = {"role": "assistant"}
+                    message = response.choices[0].message
+                    if message.content:
+                        assistant_message["content"] = message.content
+                    if message.tool_calls:
+                        # Use the raw tool_calls object from the API response
+                        assistant_message["tool_calls"] = message.tool_calls
+                    self.message_history.append(assistant_message)
 
-                    # Check if we need to summarize the history
+                    # 2. Process tool calls and add 'role: tool' messages
+                    #    Also collect the rich content for the *next* user message
+                    rich_results_for_next_user_message = []
+                    for tool_call in tool_calls:  # Iterate through the calls requested by the assistant
+                        # process_tool_call returns the rich dictionary intended for the *next* user message content
+                        tool_result_dict = self.process_tool_call(tool_call)
+
+                        # Extract a simple string result for the 'role: tool' message content
+                        tool_output_text = "Tool execution finished."  # Default/fallback text
+                        result_content_list = tool_result_dict.get("content", [])
+                        if (
+                            result_content_list
+                            and isinstance(result_content_list, list)
+                            and len(result_content_list) > 0
+                            and result_content_list[0].get("type") == "text"
+                        ):
+                            tool_output_text = result_content_list[0]["text"]  # Use the first text block as summary
+
+                        # Append the required 'role: tool' message to history
+                        self.message_history.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_output_text,  # Simple string result
+                            }
+                        )
+
+                        # Collect the rich content (text, images, etc.) from the tool result
+                        # to send in the *next* user message.
+                        rich_results_for_next_user_message.extend(tool_result_dict.get("content", []))
+
+                    # 3. Add the rich results (screenshots, memory state) as a single 'user' message
+                    if rich_results_for_next_user_message:
+                        self.message_history.append({"role": "user", "content": rich_results_for_next_user_message})
+
+                    # Check if we need to summarize the history (moved slightly, but logic is the same)
                     if len(self.message_history) >= self.max_history:
                         self.summarize_history()
 
@@ -296,7 +351,7 @@ class SimpleAgent:
                 logger.info("Received keyboard interrupt, stopping")
                 self.running = False
             except Exception as e:
-                logger.error(f"Error in agent loop: {e}")
+                logger.error("Error in agent loop.", exc_info=True)
                 raise e
 
         if not self.running:
@@ -306,21 +361,25 @@ class SimpleAgent:
 
     def summarize_history(self):
         """Generate a summary of the conversation history and replace the history with just the summary."""
-        logger.info(f"[Agent] Generating conversation summary...")
-        
+        logger.info("[Agent] Generating conversation summary...")
+
         # Get a new screenshot for the summary
         screenshot = self.emulator.get_screenshot()
         screenshot_b64 = get_screenshot_base64(screenshot, upscale=2)
-        
-        # Create messages for the summarization request - pass the entire conversation history
-        messages = copy.deepcopy(self.message_history) 
 
+        # Create messages for the summarization request - pass the entire conversation history
+        messages = copy.deepcopy(self.message_history)
 
         if len(messages) >= 3:
             if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and messages[-1]["content"]:
                 messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
-            
-            if len(messages) >= 5 and messages[-3]["role"] == "user" and isinstance(messages[-3]["content"], list) and messages[-3]["content"]:
+
+            if (
+                len(messages) >= 5
+                and messages[-3]["role"] == "user"
+                and isinstance(messages[-3]["content"], list)
+                and messages[-3]["content"]
+            ):
                 messages[-3]["content"][-1]["cache_control"] = {"type": "ephemeral"}
 
         messages += [
@@ -334,22 +393,23 @@ class SimpleAgent:
                 ],
             }
         ]
-        
-        # Get summary from Claude
-        response = self.client.messages.create(
+
+        # Get summary from OpenAI
+        response = self.client.chat.completions.create(
             model=MODEL_NAME,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=messages,
-            temperature=TEMPERATURE
+            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            temperature=TEMPERATURE,
         )
-        
+
+        logger.info(f"Summary response usage: {response.usage}")
+
         # Extract the summary text
         summary_text = " ".join([block.text for block in response.content if block.type == "text"])
-        
-        logger.info(f"[Agent] Game Progress Summary:")
+
+        logger.info("[Agent] Game Progress Summary:")
         logger.info(f"{summary_text}")
-        
+
         # Replace message history with just the summary
         self.message_history = [
             {
@@ -357,30 +417,26 @@ class SimpleAgent:
                 "content": [
                     {
                         "type": "text",
-                        "text": f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}"
+                        "text": f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}",
                     },
                     {
                         "type": "text",
-                        "text": "\n\nCurrent game screenshot for reference:"
+                        "text": "\n\nCurrent game screenshot for reference:",
                     },
                     {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": screenshot_b64,
-                        },
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
                     },
                     {
                         "type": "text",
-                        "text": "You were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next action."
+                        "text": "You were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next action.",
                     },
-                ]
+                ],
             }
         ]
-        
-        logger.info(f"[Agent] Message history condensed into summary.")
-        
+
+        logger.info("[Agent] Message history condensed into summary.")
+
     def stop(self):
         """Stop the agent."""
         self.running = False

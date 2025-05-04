@@ -1,12 +1,13 @@
+import heapq
 import io
 import logging
 import pickle
 from collections import deque
-import heapq
 
-from agent.memory_reader import PokemonRedReader, StatusCondition
 from PIL import Image
 from pyboy import PyBoy
+
+from agent.memory_reader import PokemonRedReader, StatusCondition
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class Emulator:
         """
         Load a state from a pickled file into the emulator.
         The pickled file should contain a dictionary with a 'pyboy_state' key.
-        
+
         Args:
             state_filename: Path to the state file
         """
@@ -55,37 +56,48 @@ class Emulator:
 
     def press_buttons(self, buttons, wait=True):
         """Press a sequence of buttons on the Game Boy.
-        
+
         Args:
             buttons (list[str]): List of buttons to press in sequence
             wait (bool): Whether to wait after each button press
-            
+
         Returns:
             str: Result of the button presses
         """
         results = []
-        
+
         for button in buttons:
-            if button not in ["a", "b", "start", "select", "up", "down", "left", "right"]:
+            if button not in [
+                "a",
+                "b",
+                "start",
+                "select",
+                "up",
+                "down",
+                "left",
+                "right",
+            ]:
                 results.append(f"Invalid button: {button}")
                 continue
-                
+
             self.pyboy.button_press(button)
-            self.tick(10)   # Press briefly
+            self.tick(10)  # Press briefly
             self.pyboy.button_release(button)
-            
+
             if wait:
-                self.tick(120) # Wait longer after button release
+                self.tick(120)  # Wait longer after button release
             else:
-                self.tick(10)   # Brief pause between button presses
-                
+                self.tick(10)  # Brief pause between button presses
+
             results.append(f"Pressed {button}")
-        
+
         return "\n".join(results)
 
     def get_coordinates(self):
         """
         Returns the player's current coordinates from game memory.
+        Note: Pokemon Red specific.
+
         Returns:
             tuple[int, int]: (x, y) coordinates
         """
@@ -415,9 +427,7 @@ class Emulator:
                 min_distance = current_distance
 
             # If we're next to target and target is a wall, we can end here
-            if (abs(current[0] - end[0]) + abs(current[1] - end[1])) == 1 and terrain[
-                end[0]
-            ][end[1]] == 0:
+            if (abs(current[0] - end[0]) + abs(current[1] - end[1])) == 1 and terrain[end[0]][end[1]] == 0:
                 path = reconstruct_path(current)
                 # Add final move onto wall
                 if end[0] > current[0]:
@@ -454,15 +464,9 @@ class Emulator:
 
                 # Check tile pair collisions
                 # Get bottom-left tile of each 2x2 block
-                current_tile = full_map[current[0] * 2 + 1][
-                    current[1] * 2
-                ]  # Bottom-left tile of current block
-                neighbor_tile = full_map[neighbor[0] * 2 + 1][
-                    neighbor[1] * 2
-                ]  # Bottom-left tile of neighbor block
-                if not self._can_move_between_tiles(
-                    current_tile, neighbor_tile, tileset
-                ):
+                current_tile = full_map[current[0] * 2 + 1][current[1] * 2]  # Bottom-left tile of current block
+                neighbor_tile = full_map[neighbor[0] * 2 + 1][neighbor[1] * 2]  # Bottom-left tile of neighbor block
+                if not self._can_move_between_tiles(current_tile, neighbor_tile, tileset):
                     continue
 
                 tentative_g_score = g_score[current] + 1

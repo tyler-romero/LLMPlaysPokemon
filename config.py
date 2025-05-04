@@ -1,5 +1,5 @@
 # Configuration for the application
-MODEL_NAME = "claude-3-7-sonnet-20250219"
+MODEL_NAME = "gpt-4.1-nano"
 TEMPERATURE = 1.0
 MAX_TOKENS = 4000
 

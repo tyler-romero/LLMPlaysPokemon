@@ -48,3 +48,7 @@ ENV/
 
 # System
 .DS_Store
+
+# Project
+pokemon.gb
+pokemon.gb.ram
