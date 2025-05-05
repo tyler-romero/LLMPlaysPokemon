@@ -4,8 +4,16 @@ import io
 import json
 import logging
 import os
+import typing
 
 from openai import OpenAI
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageParam,
+    ChatCompletionToolMessageParam,
+    ChatCompletionToolParam,
+    ChatCompletionUserMessageParam,
+)
 
 from agent.emulator import Emulator
 from config import MAX_TOKENS, MODEL_NAME, TEMPERATURE, USE_NAVIGATOR
@@ -114,7 +122,7 @@ if USE_NAVIGATOR:
 
 
 class SimpleAgent:
-    def __init__(self, rom_path, headless=True, sound=False, max_history=60, load_state=None):
+    def __init__(self, rom_path, headless=True, sound=False, max_history=60, load_state=None, web_output_dir=None):
         """Initialize the simple agent.
 
         Args:
@@ -122,16 +130,41 @@ class SimpleAgent:
             headless: Whether to run without display
             sound: Whether to enable sound
             max_history: Maximum number of messages in history before summarization
+            load_state: Path to a saved state file to load
+            web_output_dir: Directory to save latest.png for web viewing
         """
         self.emulator = Emulator(rom_path, headless, sound)
         self.emulator.initialize()  # Initialize the emulator
+        # self.client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
         self.client = OpenAI()
         self.running = True
         self.message_history = [{"role": "user", "content": "You may now begin playing."}]
         self.max_history = max_history
+        self.web_output_dir = web_output_dir
         if load_state:
             logger.info(f"Loading saved state from {load_state}")
             self.emulator.load_state(load_state)
+
+        # Save initial screenshot if web output is enabled
+        if self.web_output_dir:
+            self._save_web_screenshot()
+
+    def _save_web_screenshot(self):
+        """Save the current screenshot to web_output_dir/latest.png if web output is enabled."""
+        if not self.web_output_dir:
+            return  # Web output not enabled
+
+        try:
+            # Get screenshot and save to file
+            screenshot = self.emulator.get_screenshot()
+            if screenshot:
+                output_file = os.path.join(self.web_output_dir, "latest.png")
+                screenshot.save(output_file)
+                logger.debug(f"Saved screenshot to {output_file}")
+            else:
+                logger.warning("Could not get screenshot for web output")
+        except Exception as e:
+            logger.error(f"Error saving screenshot for web output: {e}")
 
     def process_tool_call(self, tool_call):
         """Process a single tool call."""
@@ -149,6 +182,10 @@ class SimpleAgent:
             # Get a fresh screenshot after executing the buttons
             screenshot = self.emulator.get_screenshot()
             screenshot_b64 = get_screenshot_base64(screenshot, upscale=2)
+
+            # Save screenshot for web viewing if enabled
+            if self.web_output_dir:
+                self._save_web_screenshot()
 
             # Get game state from memory after the action
             memory_info = self.emulator.get_state_from_memory()
@@ -197,6 +234,10 @@ class SimpleAgent:
             # Get a fresh screenshot after executing the navigation
             screenshot = self.emulator.get_screenshot()
             screenshot_b64 = get_screenshot_base64(screenshot, upscale=2)
+
+            # Save screenshot for web viewing if enabled
+            if self.web_output_dir:
+                self._save_web_screenshot()
 
             # Get game state from memory after the action
             memory_info = self.emulator.get_state_from_memory()
@@ -248,32 +289,36 @@ class SimpleAgent:
         steps_completed = 0
         while self.running and steps_completed < num_steps:
             try:
-                messages = copy.deepcopy(self.message_history)
+                messages: typing.List[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)
 
                 # Mark screenshots as ephemeral to save context space
                 if len(messages) >= 3:
-                    if (
-                        messages[-1]["role"] == "user"
-                        and isinstance(messages[-1]["content"], list)
-                        and messages[-1]["content"]
-                    ):
-                        messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+                    last_msg = messages[-1]
+                    if last_msg["role"] == "user" and isinstance(last_msg["content"], list) and last_msg["content"]:
+                        content_list = last_msg["content"]
+                        if content_list and isinstance(content_list[-1], dict):
+                            content_list[-1]["cache_control"] = {"type": "ephemeral"}
 
-                    if (
-                        len(messages) >= 5
-                        and messages[-3]["role"] == "user"
-                        and isinstance(messages[-3]["content"], list)
-                        and messages[-3]["content"]
-                    ):
-                        messages[-3]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+                    if len(messages) >= 5:
+                        third_last_msg = messages[-3]
+                        if (
+                            third_last_msg["role"] == "user"
+                            and isinstance(third_last_msg["content"], list)
+                            and third_last_msg["content"]
+                        ):
+                            content_list = third_last_msg["content"]
+                            if content_list and isinstance(content_list[-1], dict):
+                                content_list[-1]["cache_control"] = {"type": "ephemeral"}
 
-                # Get model response
-                logger.info(f"Messages: {messages}")
+                # Cast tools before sending to API
+                api_tools = typing.cast(typing.List[ChatCompletionToolParam], AVAILABLE_TOOLS)
+
+                # logger.info(f"Calling model {MODEL_NAME} with {len(messages)} messages")
                 response = self.client.chat.completions.create(
                     model=MODEL_NAME,
                     max_tokens=MAX_TOKENS,
                     messages=messages,
-                    tools=AVAILABLE_TOOLS,
+                    tools=api_tools,
                     temperature=TEMPERATURE,
                 )
 
@@ -292,28 +337,30 @@ class SimpleAgent:
                 if tool_calls:
                     for tool_call in tool_calls:
                         logger.info(f"[Tool] Using tool: {tool_call.function.name}")
+                else:
+                    logger.info("[No Tool] No tool calls made")
 
                 # Process tool calls
                 if tool_calls:
                     # 1. Add the assistant message correctly (with potential tool_calls attribute)
-                    assistant_message = {"role": "assistant"}
-                    message = response.choices[0].message
-                    if message.content:
-                        assistant_message["content"] = message.content
-                    if message.tool_calls:
-                        # Use the raw tool_calls object from the API response
-                        assistant_message["tool_calls"] = message.tool_calls
-                    self.message_history.append(assistant_message)
+                    assistant_response_message = response.choices[0].message
+                    assistant_message_dict: typing.Dict[str, typing.Any] = {"role": "assistant"}
+                    if assistant_response_message.content:
+                        assistant_message_dict["content"] = assistant_response_message.content
+                    if assistant_response_message.tool_calls:
+                        assistant_message_dict["tool_calls"] = assistant_response_message.tool_calls
+
+                    self.message_history.append(
+                        typing.cast(ChatCompletionAssistantMessageParam, assistant_message_dict)
+                    )
 
                     # 2. Process tool calls and add 'role: tool' messages
-                    #    Also collect the rich content for the *next* user message
                     rich_results_for_next_user_message = []
-                    for tool_call in tool_calls:  # Iterate through the calls requested by the assistant
-                        # process_tool_call returns the rich dictionary intended for the *next* user message content
+                    for tool_call in tool_calls:
                         tool_result_dict = self.process_tool_call(tool_call)
+                        self._save_web_screenshot()
 
-                        # Extract a simple string result for the 'role: tool' message content
-                        tool_output_text = "Tool execution finished."  # Default/fallback text
+                        tool_output_text = "Tool execution finished."
                         result_content_list = tool_result_dict.get("content", [])
                         if (
                             result_content_list
@@ -321,26 +368,26 @@ class SimpleAgent:
                             and len(result_content_list) > 0
                             and result_content_list[0].get("type") == "text"
                         ):
-                            tool_output_text = result_content_list[0]["text"]  # Use the first text block as summary
+                            tool_output_text = result_content_list[0]["text"] or tool_output_text
 
-                        # Append the required 'role: tool' message to history
-                        self.message_history.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": tool_output_text,  # Simple string result
-                            }
-                        )
+                        tool_message: ChatCompletionToolMessageParam = {
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": tool_output_text,
+                        }
+                        self.message_history.append(tool_message)
 
-                        # Collect the rich content (text, images, etc.) from the tool result
-                        # to send in the *next* user message.
                         rich_results_for_next_user_message.extend(tool_result_dict.get("content", []))
 
                     # 3. Add the rich results (screenshots, memory state) as a single 'user' message
                     if rich_results_for_next_user_message:
-                        self.message_history.append({"role": "user", "content": rich_results_for_next_user_message})
+                        user_message: ChatCompletionUserMessageParam = {
+                            "role": "user",
+                            "content": rich_results_for_next_user_message,
+                        }
+                        self.message_history.append(user_message)
 
-                    # Check if we need to summarize the history (moved slightly, but logic is the same)
+                    # Check if we need to summarize the history
                     if len(self.message_history) >= self.max_history:
                         self.summarize_history()
 
@@ -356,6 +403,8 @@ class SimpleAgent:
 
         if not self.running:
             self.emulator.stop()
+        else:
+            self._save_web_screenshot()
 
         return steps_completed
 
@@ -363,79 +412,92 @@ class SimpleAgent:
         """Generate a summary of the conversation history and replace the history with just the summary."""
         logger.info("[Agent] Generating conversation summary...")
 
-        # Get a new screenshot for the summary
-        screenshot = self.emulator.get_screenshot()
-        screenshot_b64 = get_screenshot_base64(screenshot, upscale=2)
+        messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)
 
-        # Create messages for the summarization request - pass the entire conversation history
-        messages = copy.deepcopy(self.message_history)
-
+        # Mark screenshots ephemeral (logic copied from run method, adapt if needed)
         if len(messages) >= 3:
-            if messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list) and messages[-1]["content"]:
-                messages[-1]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+            last_msg = messages[-1]
+            if last_msg["role"] == "user" and isinstance(last_msg["content"], list) and last_msg["content"]:
+                content_list = last_msg["content"]
+                if content_list and isinstance(content_list[-1], dict):
+                    content_list[-1]["cache_control"] = {"type": "ephemeral"}
+            if len(messages) >= 5:
+                third_last_msg = messages[-3]
+                if (
+                    third_last_msg["role"] == "user"
+                    and isinstance(third_last_msg["content"], list)
+                    and third_last_msg["content"]
+                ):
+                    content_list = third_last_msg["content"]
+                    if content_list and isinstance(content_list[-1], dict):
+                        content_list[-1]["cache_control"] = {"type": "ephemeral"}
 
-            if (
-                len(messages) >= 5
-                and messages[-3]["role"] == "user"
-                and isinstance(messages[-3]["content"], list)
-                and messages[-3]["content"]
-            ):
-                messages[-3]["content"][-1]["cache_control"] = {"type": "ephemeral"}
+        messages.append(
+            typing.cast(
+                ChatCompletionUserMessageParam,
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": SUMMARY_PROMPT,
+                        }
+                    ],
+                },
+            )
+        )
 
-        messages += [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": SUMMARY_PROMPT,
-                    }
-                ],
-            }
-        ]
+        # Construct the system message and combine with others
+        system_message: ChatCompletionMessageParam = {"role": "system", "content": SYSTEM_PROMPT}
+        summary_api_messages = [system_message] + messages
 
-        # Get summary from OpenAI
+        logger.info(f"Calling model {MODEL_NAME} for summarization with {len(summary_api_messages)} messages")
         response = self.client.chat.completions.create(
             model=MODEL_NAME,
             max_tokens=MAX_TOKENS,
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + messages,
+            messages=summary_api_messages,
             temperature=TEMPERATURE,
         )
 
         logger.info(f"Summary response usage: {response.usage}")
-
-        # Extract the summary text
-        summary_text = " ".join([block.text for block in response.content if block.type == "text"])
-
+        summary_text = response.choices[0].message.content or "Summary generation failed."
         logger.info("[Agent] Game Progress Summary:")
         logger.info(f"{summary_text}")
 
-        # Replace message history with just the summary
+        # Get current screenshot B64 for the new history
+        summary_screenshot = self.emulator.get_screenshot()
+        summary_screenshot_b64 = get_screenshot_base64(summary_screenshot, upscale=2)
+
+        # Construct the new history after summarization
         self.message_history = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}",
-                    },
-                    {
-                        "type": "text",
-                        "text": "\n\nCurrent game screenshot for reference:",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"},
-                    },
-                    {
-                        "type": "text",
-                        "text": "You were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next action.",
-                    },
-                ],
-            }
+            typing.cast(
+                ChatCompletionUserMessageParam,
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}",
+                        },
+                        {
+                            "type": "text",
+                            "text": "\n\nCurrent game screenshot for reference:",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{summary_screenshot_b64}"},
+                        },
+                        {
+                            "type": "text",
+                            "text": "You were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next action.",
+                        },
+                    ],
+                },
+            )
         ]
 
         logger.info("[Agent] Message history condensed into summary.")
+        self._save_web_screenshot()
 
     def stop(self):
         """Stop the agent."""

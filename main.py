@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+import sys
 
 from agent.simple_agent import SimpleAgent
 
@@ -31,8 +32,16 @@ def main():
         help="Maximum number of messages in history before summarization",
     )
     parser.add_argument("--load-state", type=str, default=None, help="Path to a saved state to load")
+    parser.add_argument(
+        "--web-output", action="store_true", help="Save latest screenshots to ./web_output/ for web viewing"
+    )
 
     args = parser.parse_args()
+
+    # Validate conflicting arguments
+    if args.web_output and args.display:
+        logger.error("Cannot use both --display and --web-output flags simultaneously.")
+        sys.exit(1)
 
     # Get absolute path to ROM
     if not os.path.isabs(args.rom):
@@ -47,6 +56,17 @@ def main():
         print("Place the ROM in the root directory or specify its path with --rom.")
         return
 
+    # Set up web output directory if needed
+    web_output_dir = None
+    if args.web_output:
+        web_output_dir = "web_output"
+        try:
+            os.makedirs(web_output_dir, exist_ok=True)
+            logger.info(f"Web output mode enabled. Screenshots will be saved to {web_output_dir}/latest.png")
+        except OSError as e:
+            logger.error(f"Failed to create web output directory {web_output_dir}: {e}")
+            sys.exit(1)
+
     # Create and run agent
     agent = SimpleAgent(
         rom_path=rom_path,
@@ -54,6 +74,7 @@ def main():
         sound=args.sound if args.display else False,
         max_history=args.max_history,
         load_state=args.load_state,
+        web_output_dir=web_output_dir,  # Pass web output directory to agent
     )
 
     try:
