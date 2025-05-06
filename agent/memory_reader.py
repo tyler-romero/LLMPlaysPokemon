@@ -735,6 +735,11 @@ class PokemonRedReader:
         """Initialize with a PyBoy memory view object"""
         self.memory = memory_view
 
+    def read_in_combat(self) -> bool:
+        """Are we in combat?"""
+        b = self.memory[0xD057]
+        return bool(b)
+
     def read_money(self) -> int:
         """Read the player's money in Binary Coded Decimal format"""
         b1 = self.memory[0xD349]  # Least significant byte
@@ -916,11 +921,7 @@ class PokemonRedReader:
             addr = base_addresses[i]
 
             # Read experience (3 bytes)
-            exp = (
-                (self.memory[addr + 0x1A] << 16)
-                + (self.memory[addr + 0x1B] << 8)
-                + self.memory[addr + 0x1C]
-            )
+            exp = (self.memory[addr + 0x1A] << 16) + (self.memory[addr + 0x1B] << 8) + self.memory[addr + 0x1C]
 
             # Read moves and PP
             moves = []
@@ -932,9 +933,7 @@ class PokemonRedReader:
                     move_pp.append(self.memory[addr + 0x1D + j])
 
             # Read nickname
-            nickname = self._convert_text(
-                self.memory[nickname_addresses[i] : nickname_addresses[i] + 11]
-            )
+            nickname = self._convert_text(self.memory[nickname_addresses[i] : nickname_addresses[i] + 11])
 
             type1 = PokemonType(self.memory[addr + 5])
             type2 = PokemonType(self.memory[addr + 6])
@@ -1165,9 +1164,7 @@ class PokemonRedReader:
             ):
                 space_count = 0
                 current_line.append(b)
-                last_was_border = (
-                    0x79 <= b <= 0x7E
-                )  # Track if this is a border character
+                last_was_border = 0x79 <= b <= 0x7E  # Track if this is a border character
 
             # If we see a lot of spaces, might be end of line
             if space_count > 10 and current_line:

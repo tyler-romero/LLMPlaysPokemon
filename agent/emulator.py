@@ -1,8 +1,9 @@
+import datetime
 import heapq
-import io
 import logging
-import pickle
-from collections import deque
+import os
+import random
+import time
 
 from PIL import Image
 from pyboy import PyBoy
@@ -42,6 +43,7 @@ class Emulator:
 
     def get_screenshot(self):
         """Get the current screenshot."""
+        time.sleep(0.2 + random.random())
         return Image.fromarray(self.pyboy.screen.ndarray)
 
     def load_state(self, state_filename):
@@ -52,9 +54,39 @@ class Emulator:
         Args:
             state_filename: Path to the state file
         """
-        self.pyboy.load_state(open(state_filename, "rb"))
+        with open(state_filename, "rb") as f:
+            self.pyboy.load_state(f)
 
-    def press_buttons(self, buttons, wait=True):
+        memory_reader = PokemonRedReader(self.pyboy.memory)
+        player_name = memory_reader.read_player_name()
+        if player_name.strip() in ["", "NINTEN", "Not yet set"]:
+            raise ValueError("Loaded state appears to be at the beginning of the game or title screen")
+
+    def save_state(self, state_dir="saved_games"):
+        """
+        Save the current emulator state to a pickled file.
+
+        Args:
+            state_dir: Directory path where state files will be saved
+        """
+        os.makedirs(state_dir, exist_ok=True)
+
+        # Save a standard "pokemon_red_last_session.state" file
+        last_session_path = os.path.join(state_dir, "pokemon_red_last_session.state")
+        if os.path.exists(last_session_path):
+            os.remove(last_session_path)
+        with open(last_session_path, "wb") as f:
+            self.pyboy.save_state(f)
+
+        # Save a timestamped state file
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamped_path = os.path.join(state_dir, f"pokemon_red_{timestamp}.state")
+        with open(timestamped_path, "wb") as f:
+            self.pyboy.save_state(f)
+
+        logger.info(f"Saved game state to {timestamped_path} and {last_session_path}")
+
+    def press_buttons(self, buttons, wait=True) -> str:
         """Press a sequence of buttons on the Game Boy.
 
         Args:
@@ -78,7 +110,7 @@ class Emulator:
                 "right",
             ]:
                 results.append(f"Invalid button: {button}")
-                continue
+                raise ValueError(f"Invalid button: {button}")
 
             self.pyboy.button_press(button)
             self.tick(10)  # Press briefly
@@ -95,7 +127,7 @@ class Emulator:
 
     def get_coordinates(self):
         """
-        Returns the player's current coordinates from game memory.
+        Returns the player's current map coordinates from game memory.
         Note: Pokemon Red specific.
 
         Returns:
@@ -225,6 +257,8 @@ class Emulator:
         Returns a list of valid moves (up, down, left, right) based on the collision map.
         Returns:
             list[str]: List of valid movement directions
+
+        NOTE: this may not be correct re: sprites, warps, etc
         """
         # Get collision map
         collision_map = self.pyboy.game_wrapper.game_area_collision()
@@ -411,7 +445,7 @@ class Emulator:
                 is_wall = terrain[end[0]][end[1]] == 0
                 if is_wall:
                     return (
-                        f"Partial Success: Your target location is a wall. In case this is intentional, attempting to navigate there.",
+                        "Partial Success: Your target location is a wall. In case this is intentional, attempting to navigate there.",
                         path,
                     )
                 else:
@@ -480,7 +514,7 @@ class Emulator:
         if closest_point != start:
             path = reconstruct_path(closest_point)
             return (
-                f"Partial Success: Could not reach the exact target, but found a path to the closest reachable point.",
+                "Partial Success: Could not reach the exact target, but found a path to the closest reachable point.",
                 path,
             )
 
@@ -489,56 +523,66 @@ class Emulator:
             [],
         )
 
-    def get_state_from_memory(self) -> str:
+    def get_in_combat(self) -> bool:
+        reader = PokemonRedReader(self.pyboy.memory)
+        return reader.read_in_combat()
+
+    def get_state_from_memory(self) -> tuple[dict, str, tuple[int, int]]:
         """
-        Reads the game state from memory and returns a string representation of it.
+        Reads the game state from memory and returns a dictionary representation of it.
         """
         reader = PokemonRedReader(self.pyboy.memory)
-        memory_str = ""
+        memory_dict = {}
 
         name = reader.read_player_name()
-        if name == "NINTEN":
+        if name == "NINTEN" or name == "AAAAAAA":
             name = "Not yet set"
         rival_name = reader.read_rival_name()
-        if rival_name == "SONY":
+        if rival_name == "SONY" or rival_name == "AAAAAAA":
             rival_name = "Not yet set"
 
         # Get valid moves
         valid_moves = self.get_valid_moves()
-        valid_moves_str = ", ".join(valid_moves) if valid_moves else "None"
 
-        memory_str += f"Player: {name}\n"
-        memory_str += f"Rival: {rival_name}\n"
-        memory_str += f"Money: ${reader.read_money()}\n"
-        memory_str += f"Location: {reader.read_location()}\n"
-        memory_str += f"Coordinates: {reader.read_coordinates()}\n"
-        memory_str += f"Valid Moves: {valid_moves_str}\n"
-        memory_str += f"Badges: {', '.join(reader.read_badges())}\n"
+        location = reader.read_location()
+        coords = reader.read_coordinates()  # This comes out col, row (x, y)
+
+        memory_dict["player"] = name
+        memory_dict["rival"] = rival_name
+        memory_dict["money"] = f"${reader.read_money()}"
+        memory_dict["location"] = location
+        memory_dict["map_coordinates"] = coords
+        memory_dict["valid_moves"] = valid_moves if valid_moves else []
+        memory_dict["badges"] = reader.read_badges()
 
         # Inventory
-        memory_str += "Inventory:\n"
+        memory_dict["inventory"] = []
         for item, qty in reader.read_items():
-            memory_str += f"  {item} x{qty}\n"
+            memory_dict["inventory"].append({"item": item, "quantity": qty})
 
         # Dialog
         dialog = reader.read_dialog()
-        if dialog:
-            memory_str += f"Dialog: {dialog}\n"
-        else:
-            memory_str += "Dialog: None\n"
+        memory_dict["dialog"] = dialog if dialog else None
 
         # Party Pokemon
-        memory_str += "\nPokemon Party:\n"
+        memory_dict["pokemon_party"] = []
         for pokemon in reader.read_party_pokemon():
-            memory_str += f"\n{pokemon.nickname} ({pokemon.species_name}):\n"
-            memory_str += f"Level {pokemon.level} - HP: {pokemon.current_hp}/{pokemon.max_hp}\n"
-            memory_str += f"Types: {pokemon.type1.name}{', ' + pokemon.type2.name if pokemon.type2 else ''}\n"
-            for move, pp in zip(pokemon.moves, pokemon.move_pp, strict=True):
-                memory_str += f"- {move} (PP: {pp})\n"
-            if pokemon.status != StatusCondition.NONE:
-                memory_str += f"Status: {pokemon.status.get_status_name()}\n"
+            pokemon_dict = {
+                "nickname": pokemon.nickname,
+                "species_name": pokemon.species_name,
+                "level": pokemon.level,
+                "hp": f"{pokemon.current_hp}/{pokemon.max_hp}",
+                "types": f"{pokemon.type1.name}{', ' + pokemon.type2.name if pokemon.type2 else ''}",
+                "moves": [],
+                "status": pokemon.status.get_status_name() if pokemon.status != StatusCondition.NONE else None,
+            }
 
-        return memory_str
+            for move, pp in zip(pokemon.moves, pokemon.move_pp, strict=True):
+                pokemon_dict["moves"].append({"name": move, "pp": pp})
+
+            memory_dict["party"].append(pokemon_dict)
+
+        return memory_dict, location, coords
 
     def stop(self):
         self.pyboy.stop()

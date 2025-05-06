@@ -52,3 +52,4 @@ ENV/
 # Project
 pokemon.gb
 pokemon.gb.ram
+saved_games/
