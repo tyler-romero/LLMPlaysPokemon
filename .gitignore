@@ -52,6 +52,7 @@ ENV/
 # Project
 pokemon.gb
 pokemon.gb.ram
+web_output/
 saved_games/
 agent_memory.txt
 agent_memory.txt.old

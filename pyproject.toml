@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A project where LLMs play Pokemon"
 readme = "README.md"
 requires-python = "==3.11.*"
-license = {text = "MIT"}
+license = { text = "MIT" }
 dependencies = [
     "pyboy==2.5.3",
     "Pillow",
@@ -14,16 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest",
-    "ruff",
-]
-
-[tool.uv]
-environments = [
-    "sys_platform == 'linux'"
-]
-
+dev = ["pytest", "ruff"]
 
 [tool.ruff]
 line-length = 120
