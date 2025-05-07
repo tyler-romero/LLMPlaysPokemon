@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="Claude Plays Pokemon - Starter Version")
     parser.add_argument("--rom", type=str, default="pokemon.gb", help="Path to the Pokemon ROM file")
-    parser.add_argument("--steps", type=int, default=10, help="Number of agent steps to run")
+    parser.add_argument("--steps", type=int, default=250, help="Number of agent steps to run")
     parser.add_argument("--display", action="store_true", help="Run with display (not headless)")
     parser.add_argument(
         "--sound",
@@ -31,6 +31,7 @@ def main():
         default=30,
         help="Maximum number of messages in history before summarization",
     )
+    parser.add_argument("--save-every", type=int, default=100, help="Number of steps between save_state() calls")
     parser.add_argument("--load-state", type=str, default=None, help="Path to a saved state to load")
     parser.add_argument(
         "--web-output", action="store_true", help="Save latest screenshots to ./web_output/ for web viewing"
@@ -73,6 +74,7 @@ def main():
         headless=not args.display,
         sound=args.sound if args.display else False,
         max_history=args.max_history,
+        save_every=args.save_every,
         load_state=args.load_state,
         web_output_dir=web_output_dir,  # Pass web output directory to agent
     )
@@ -86,6 +88,7 @@ def main():
     except Exception as e:
         logger.error(f"Error running agent: {e}")
     finally:
+        logger.info("Stopping agent")
         agent.stop()
 
 

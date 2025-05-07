@@ -142,7 +142,16 @@ def create_user_message_with_game_state(
 
 
 class SimpleAgent:
-    def __init__(self, rom_path, headless=True, sound=False, max_history=60, load_state=None, web_output_dir=None):
+    def __init__(
+        self,
+        rom_path,
+        headless=True,
+        sound=False,
+        max_history=60,
+        save_every=100,
+        load_state=None,
+        web_output_dir=None,
+    ):
         """Initialize the simple agent.
 
         Args:
@@ -150,6 +159,7 @@ class SimpleAgent:
             headless: Whether to run without display
             sound: Whether to enable sound
             max_history: Maximum number of messages in history before summarization
+            save_every: Number of steps between save_state() calls
             load_state: Path to a saved state file to load
             web_output_dir: Directory to save latest.png for web viewing
         """
@@ -169,6 +179,7 @@ class SimpleAgent:
 
         self.running = True
         self.max_history = max_history
+        self.save_every = save_every
         self.web_output_dir = web_output_dir
 
         if load_state:
@@ -287,20 +298,19 @@ class SimpleAgent:
 
                 steps_completed += 1
                 logger.info(f"Completed step {steps_completed}/{num_steps}")
+                self._save_web_screenshot()
+
+                if steps_completed % self.save_every == 0 and steps_completed > 0:
+                    self.emulator.save_state()
 
             except KeyboardInterrupt:
                 logger.info("Received keyboard interrupt, stopping")
                 self.running = False
             except Exception as e:
                 logger.error("Error in agent loop.", exc_info=True)
-                raise e
+                raise e  # skips saving state, handled in main.py
 
-        if not self.running:
-            self.emulator.save_state()
-            self.emulator.stop()
-        else:
-            self._save_web_screenshot()
-
+        self.emulator.save_state()
         return steps_completed
 
     def summarize_history(self):
