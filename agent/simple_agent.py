@@ -5,14 +5,17 @@ import json
 import logging
 import os
 
-from openai import OpenAI
+import openai
+from openai import NotGiven, OpenAI
 from openai.types.chat import (
     ChatCompletionMessage,
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
+    ChatCompletionToolParam,
     ChatCompletionUserMessageParam,
 )
 from PIL import Image, ImageDraw
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from agent.emulator import Emulator
 from agent.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
@@ -203,6 +206,26 @@ class SimpleAgent:
         )
         self.message_history = [initial_message]
 
+    @retry(
+        stop=stop_after_attempt(5),
+        wait=wait_exponential(max=60),
+        retry=retry_if_exception_type(
+            (openai.InternalServerError, openai.RateLimitError, openai.APITimeoutError, openai.APIConnectionError)
+        ),
+        reraise=True,
+        before_sleep=lambda retry_state: logger.warning(
+            f"{retry_state.outcome.exception()}: Retrying request to /chat/completions "   # type: ignore
+            f"in {retry_state.next_action.sleep} seconds"    # type: ignore
+        ),
+    )
+    def _get_chat_completion(
+        self, messages: list[ChatCompletionMessageParam], tools: list[ChatCompletionToolParam] | NotGiven = NotGiven()
+    ):
+        """Get a chat completion from the OpenAI API, retrying on 5xx errors up to 5 times."""
+        return self.client.chat.completions.create(
+            messages=messages, tools=tools, model=MODEL_NAME, max_tokens=MAX_TOKENS, temperature=TEMPERATURE
+        )
+
     def _get_post_action_data(self):
         """Get screenshot and game state after an action."""
         screenshot = self.emulator.get_screenshot()
@@ -244,19 +267,13 @@ class SimpleAgent:
         steps_completed = 0
         while self.running and steps_completed < num_steps:
             try:
-                messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)
+                messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)  # type: ignore
 
                 logger.info(f"---------- Messages ({len(messages)}) -----------")
                 pretty_print_messages(messages[-5:])
                 logger.info("-------------------------------------------")
 
-                response = self.client.chat.completions.create(
-                    model=MODEL_NAME,
-                    max_tokens=MAX_TOKENS,
-                    messages=messages,
-                    tools=self.tool_factory.get_available_tools(),
-                    temperature=TEMPERATURE,
-                )
+                response = self._get_chat_completion(messages, self.tool_factory.get_available_tools())
                 logger.info(f"Agent response usage: {response.usage}")
 
                 # Add the assistant's message to the message history
@@ -274,7 +291,7 @@ class SimpleAgent:
                 for tool_call in tool_calls:
                     logger.info(f"[Tool] Using tool {tool_call.function.name} with args {tool_call.function.arguments}")
                     tool_call_result = self.tool_factory.process_tool_call(tool_call)
-                    self.message_history.append(tool_call_result)
+                    self.message_history.append(tool_call_result)  # type: ignore
                     self._save_web_screenshot()
                 if not tool_calls:
                     logger.info("[No Tool] No tool calls made")
@@ -317,7 +334,7 @@ class SimpleAgent:
         """Generate a summary of the conversation history and replace the history with just the summary."""
         logger.info("[Agent] Generating conversation summary...")
 
-        messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)
+        messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)  # type: ignore
 
         # Add summary prompt with validation to ensure no empty content
         summary_prompt = SUMMARY_PROMPT.strip()
@@ -328,9 +345,7 @@ class SimpleAgent:
         summary_api_messages = [system_message] + messages
 
         logger.info(f"Calling model {MODEL_NAME} for summarization with {len(summary_api_messages)} messages")
-        response = self.client.chat.completions.create(
-            model=MODEL_NAME, max_tokens=MAX_TOKENS, messages=summary_api_messages, temperature=TEMPERATURE
-        )
+        response = self._get_chat_completion(summary_api_messages)
 
         logger.info(f"Summary response usage: {response.usage}")
         summary_text = response.choices[0].message.content or "Summary generation failed."

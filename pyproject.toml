@@ -10,6 +10,7 @@ dependencies = [
     "Pillow",
     "numpy",
     "openai>=1.77.0",
+    "tenacity>=9.1.2",
 ]
 
 [project.optional-dependencies]
