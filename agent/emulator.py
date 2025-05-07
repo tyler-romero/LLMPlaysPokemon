@@ -99,6 +99,15 @@ class Emulator:
         results = []
 
         for button in buttons:
+            if button == "↑":
+                button = "up"
+            elif button == "↓":
+                button = "down"
+            elif button == "←":
+                button = "left"
+            elif button == "→":
+                button = "right"
+
             if button not in [
                 "a",
                 "b",
@@ -190,17 +199,28 @@ class Emulator:
 
     def get_collision_map(self):
         """
-        Creates a simple ASCII map showing player position, direction, terrain and sprites.
+        Creates a simple ASCII map showing player position, direction, terrain, warps, and sprites.
         Returns:
             str: A string representation of the ASCII map with legend
         """
         # Get the terrain and movement data
         full_map = self.pyboy.game_wrapper.game_area()
-        collision_map = self.pyboy.game_wrapper.game_area_collision()
+        collision_map = self.pyboy.game_wrapper.game_area_collision()  # type: ignore
         downsampled_terrain = self._downsample_array(collision_map)
-
-        # Get sprite locations
         sprite_locations = self.get_sprites()
+        reader = PokemonRedReader(self.pyboy.memory)
+        warp_coords = reader.get_warps()  # absolute coordinates
+        player_absolute_coords = reader.read_coordinates()
+
+        relative_warp_coords = []
+        for warp_x, warp_y in warp_coords:
+            # Calculate relative position (player is always at (4,4) in our map)
+            rel_x = warp_x - player_absolute_coords[0] + 4
+            rel_y = warp_y - player_absolute_coords[1] + 4
+
+            # Only include warps that would appear on our 9x10 map
+            if 0 <= rel_x < 10 and 0 <= rel_y < 9:
+                relative_warp_coords.append((rel_x, rel_y))
 
         # Get character direction from the full map
         direction = self._get_direction(full_map)
@@ -211,7 +231,7 @@ class Emulator:
         direction_chars = {"up": "↑", "down": "↓", "left": "←", "right": "→"}
         player_char = direction_chars.get(direction, "P")
 
-        # Create the ASCII map
+        # Create the ASCII map (Note that this is relative to the player's position, which is always (4,4))
         horizontal_border = "+" + "-" * 10 + "+"
         lines = [horizontal_border]
 
@@ -225,6 +245,9 @@ class Emulator:
                 elif (j, i) in sprite_locations:
                     # Sprite position
                     row += "S"
+                elif (j, i) in relative_warp_coords:
+                    # Warp position
+                    row += "W"
                 else:
                     # Terrain representation
                     if downsampled_terrain[i][j] == 0:
@@ -245,6 +268,7 @@ class Emulator:
                 "█ - Wall/Obstacle",
                 "· - Path/Walkable",
                 "S - Sprite",
+                "W - Warp/Door",
                 f"{direction_chars['up']}/{direction_chars['down']}/{direction_chars['left']}/{direction_chars['right']} - Player (facing direction)",
             ]
         )
@@ -257,25 +281,37 @@ class Emulator:
         Returns a list of valid moves (up, down, left, right) based on the collision map.
         Returns:
             list[str]: List of valid movement directions
-
-        NOTE: this may not be correct re: sprites, warps, etc
         """
         # Get collision map
-        collision_map = self.pyboy.game_wrapper.game_area_collision()
+        collision_map = self.pyboy.game_wrapper.game_area_collision()  # type: ignore
         terrain = self._downsample_array(collision_map)
+        sprites = self.get_sprites()
+        reader = PokemonRedReader(self.pyboy.memory)
+        warp_coords = reader.get_warps()
 
         # Player is always at position (4,4) in the 9x10 downsampled map
         valid_moves = []
 
+        player_coords = reader.read_coordinates()
+        if player_coords in warp_coords:
+            if player_coords[0] and player_coords[1]:  # They're both not 9
+                # just yield all moves...
+                return ["↑", "↓", "←", "→"]
+            if not player_coords[0]:
+                valid_moves.append("←")
+            if not player_coords[
+                1
+            ]:  # there is a literal corner case where both are 0, but that never happens in Pokemon Red.
+                valid_moves.append("↑")
         # Check each direction
-        if terrain[3][4] != 0:  # Up
-            valid_moves.append("up")
-        if terrain[5][4] != 0:  # Down
-            valid_moves.append("down")
-        if terrain[4][3] != 0:  # Left
-            valid_moves.append("left")
-        if terrain[4][5] != 0:  # Right
-            valid_moves.append("right")
+        if terrain[3][4] != 0 and (4, 3) not in sprites:  # Up
+            valid_moves.append("↑")
+        if terrain[5][4] != 0 and (4, 5) not in sprites:  # Down
+            valid_moves.append("↓")
+        if terrain[4][3] != 0 and (3, 4) not in sprites:  # Left
+            valid_moves.append("←")
+        if terrain[4][5] != 0 and (5, 4) not in sprites:  # Right
+            valid_moves.append("→")
 
         return valid_moves
 
@@ -320,6 +356,10 @@ class Emulator:
                     return False
 
         return True
+
+    def get_warps(self):
+        reader = PokemonRedReader(self.pyboy.memory)
+        return reader.get_warps()
 
     def get_sprites(self, debug=False):
         """
@@ -546,23 +586,21 @@ class Emulator:
 
         location = reader.read_location()
         coords = reader.read_coordinates()  # This comes out col, row (x, y)
+        dialog = reader.read_dialog()
 
+        memory_dict["dialog"] = dialog if dialog else None
         memory_dict["player"] = name
         memory_dict["rival"] = rival_name
         memory_dict["money"] = f"${reader.read_money()}"
         memory_dict["location"] = location
-        memory_dict["map_coordinates"] = coords
-        memory_dict["valid_moves"] = valid_moves if valid_moves else []
+        # memory_dict["map_coordinates"] = coords
+        memory_dict["valid_moves"] = valid_moves if valid_moves and not dialog else []
         memory_dict["badges"] = reader.read_badges()
 
         # Inventory
         memory_dict["inventory"] = []
         for item, qty in reader.read_items():
             memory_dict["inventory"].append({"item": item, "quantity": qty})
-
-        # Dialog
-        dialog = reader.read_dialog()
-        memory_dict["dialog"] = dialog if dialog else None
 
         # Party Pokemon
         memory_dict["pokemon_party"] = []

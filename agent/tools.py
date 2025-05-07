@@ -1,12 +1,16 @@
 import json
 import logging
+import os
+from datetime import datetime
 
-from openai.types.chat import ChatCompletionToolMessageParam
+from openai.types.chat import ChatCompletionMessageToolCall, ChatCompletionToolMessageParam
 
 from agent.emulator import Emulator
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+MEMORY_FILE = "agent_memory.txt"
 
 
 class Tool:
@@ -20,7 +24,7 @@ class Tool:
         """Initialize the tool with an emulator instance."""
         self.emulator = emulator
 
-    def process(self, tool_call) -> ChatCompletionToolMessageParam:
+    def process(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
         """Process the tool call and return results."""
         raise NotImplementedError
 
@@ -36,70 +40,85 @@ class Tool:
         }
 
 
-class PressButtonTool(Tool):
+class PressButtonsTool(Tool):
     """Tool for pressing buttons on the Game Boy."""
 
-    name = "press_button"
-    description = "Press a button on the Game Boy."
+    name = "press_buttons"
+    description = "Press one or more buttons on the Game Boy in sequence."
     parameters = {
         "type": "object",
         "properties": {
-            "button": {
-                "type": "string",
-                "enum": [
-                    "a",
-                    "b",
-                    "up",
-                    "down",
-                    "left",
-                    "right",
-                    "start",
-                    "select",
-                ],
-                "description": "Button to press. Valid buttons: 'a', 'b', 'up', 'down', 'left', 'right', 'start', 'select'",
+            "buttons": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": [
+                        "a",
+                        "b",
+                        "↑",
+                        "↓",
+                        "←",
+                        "→",
+                        "start",
+                        "select",
+                    ],
+                },
+                "description": "Sequence of buttons to press. Valid buttons: 'a', 'b', '↑', '↓', '←', '→', 'start', 'select'",
             },
             "wait": {
                 "type": "boolean",
-                "description": "Whether to wait for a brief period after pressing button. Defaults to true.",
+                "description": "Whether to wait for a brief period after pressing each button. Defaults to true.",
             },
         },
-        "required": ["button"],
+        "required": ["buttons"],
         "additionalProperties": False,
     }
 
-    def process(self, tool_call) -> ChatCompletionToolMessageParam:
-        """Process a press_button tool call."""
+    def process(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
+        """Process a press_buttons tool call."""
         tool_input = json.loads(tool_call.function.arguments)
-        button = tool_input["button"]
+        buttons = tool_input["buttons"]
         wait = tool_input.get("wait", True)
 
-        logger.info(f"[Button] Pressing: {button} (wait={wait})")
-        self.emulator.press_buttons([button], wait)
+        if not buttons:
+            return {"role": "tool", "tool_call_id": tool_call.id, "content": "No buttons specified to press"}
+
+        results = []
+        for button in buttons:
+            logger.info(f"[Button] Pressing: {button} (wait={wait})")
+            self.emulator.press_buttons([button], wait)
+            results.append(f"Pressed button: {button}")
 
         # Return tool result as a dictionary
-        return {"role": "tool", "tool_call_id": tool_call.id, "content": f"Pressed button: {button}"}
+        return {"role": "tool", "tool_call_id": tool_call.id, "content": "\n".join(results)}
 
 
-class NavigateToCoordinatesTool(Tool):
+class NavigateToScreenCoordinatesTool(Tool):
     """Tool for navigating to a position on the map grid."""
 
-    name = "navigate_to_coordinates"
-    description = "Automatically navigate to a position on the map grid. The screen is divided into a 10x9 grid, with the top-left corner as (0, 0) and the bottom-right corner as (9, 8). This tool is only available in the overworld."
+    name = "navigate_to_screen_coordinates"
+    description = "Automatically navigate to a position on the current screen. The screen is divided into a 10x9 grid, with the left-top corner as (0, 0) and the right-bottom corner as (9, 8). The player is always at (4, 4) and the map moves around them. This tool is only available in the overworld."
     parameters = {
         "type": "object",
         "properties": {
-            "col": {"type": "integer", "description": "The column coordinate to navigate to (0-9)."},
-            "row": {"type": "integer", "description": "The row coordinate to navigate to (0-8)."},
+            "coordinates": {
+                "type": "array",
+                "description": "A tuple of [col, row] coordinates to navigate to. Column ranges from 0-9, row ranges from 0-8.",
+                "items": {"type": "integer"},
+                "minItems": 2,
+                "maxItems": 2,
+            }
         },
-        "required": ["col", "row"],
+        "required": ["coordinates"],
         "additionalProperties": False,
     }
 
     def process(self, tool_call) -> ChatCompletionToolMessageParam:
         """Process a navigate_to tool call."""
         tool_input = json.loads(tool_call.function.arguments)
-        row = tool_input["row"]
-        col = tool_input["col"]
+        coordinates = tool_input["coordinates"]
+        row = coordinates[1]
+        col = coordinates[0]
 
         logger.info(f"[Navigation] Navigating to: ({row}, {col})")
 
@@ -113,46 +132,6 @@ class NavigateToCoordinatesTool(Tool):
             result = f"Navigation failed: {status}"
 
         # Return tool result as a dictionary
-        return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
-
-
-class DeadReckoningNavigationTool(Tool):
-    """Tool for navigating using dead reckoning (relative movement from current position)."""
-
-    name = "navigate_using_dead_reckoning"
-    description = "Navigate using relative directions from the current position. This tool allows you to specify a sequence of movements (up, down, left, right) to execute in order."
-    parameters = {
-        "type": "object",
-        "properties": {
-            "directions": {
-                "type": "array",
-                "description": "A sequence of directions to move in ('up', 'down', 'left', 'right'). For example, ['up', 'right', 'down'] would move up, then right, then down.",
-                "items": {"type": "string", "enum": ["up", "down", "left", "right"]},
-            },
-            "wait_after_each": {
-                "type": "boolean",
-                "description": "Whether to wait after each button press for the movement to complete.",
-                "default": True,
-            },
-        },
-        "required": ["directions"],
-        "additionalProperties": False,
-    }
-
-    def process(self, tool_call) -> ChatCompletionToolMessageParam:
-        """Process a dead reckoning navigation tool call."""
-        tool_input = json.loads(tool_call.function.arguments)
-        directions = tool_input["directions"]
-        wait_after_each = tool_input.get("wait_after_each", True)
-
-        logger.info(f"[Dead Reckoning] Executing {len(directions)} movements: {directions}")
-
-        result_parts = []
-        for i, direction in enumerate(directions):
-            result = self.emulator.press_buttons([direction], wait=wait_after_each)
-            result_parts.append(f"\tStep {i + 1}: Moved {direction} ({result=})")
-
-        result = "\n".join(result_parts)
         return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
 
 
@@ -231,7 +210,7 @@ class OnScreenKeyboardTool(Tool):
     # Reverse mapping to find coordinates for a character
     CHAR_TO_COORDS = {char: coords for coords, char in KEYBOARD_LAYOUT.items()}
 
-    def process(self, tool_call) -> ChatCompletionToolMessageParam:
+    def process(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
         """Process a keyboard_input tool call."""
         tool_input = json.loads(tool_call.function.arguments)
         text = tool_input["text"]
@@ -243,11 +222,6 @@ class OnScreenKeyboardTool(Tool):
         current_pos = (0, 0)  # Start at 'A'
 
         for char in text.upper():
-            if char == " ":
-                # Handle space character (not explicitly shown in the layout)
-                result_parts.append("Skipping space character")
-                continue
-
             if char not in self.CHAR_TO_COORDS:
                 result_parts.append(f"Character '{char}' not found on keyboard, skipping")
                 continue
@@ -260,21 +234,17 @@ class OnScreenKeyboardTool(Tool):
                 if current_pos[0] < target_pos[0]:
                     self.emulator.press_buttons(["right"], wait=True)
                     current_pos = (current_pos[0] + 1, current_pos[1])
-                    result_parts.append(f"Moved right to {current_pos}")
                 elif current_pos[0] > target_pos[0]:
                     self.emulator.press_buttons(["left"], wait=True)
                     current_pos = (current_pos[0] - 1, current_pos[1])
-                    result_parts.append(f"Moved left to {current_pos}")
 
                 # Move vertically
                 elif current_pos[1] < target_pos[1]:
                     self.emulator.press_buttons(["down"], wait=True)
                     current_pos = (current_pos[0], current_pos[1] + 1)
-                    result_parts.append(f"Moved down to {current_pos}")
                 elif current_pos[1] > target_pos[1]:
                     self.emulator.press_buttons(["up"], wait=True)
                     current_pos = (current_pos[0], current_pos[1] - 1)
-                    result_parts.append(f"Moved up to {current_pos}")
 
             # Press A to select the character
             self.emulator.press_buttons(["a"], wait=True)
@@ -289,25 +259,149 @@ class OnScreenKeyboardTool(Tool):
                 if current_pos[0] < end_pos[0]:
                     self.emulator.press_buttons(["right"], wait=True)
                     current_pos = (current_pos[0] + 1, current_pos[1])
-                    result_parts.append(f"Moved right to {current_pos}")
                 elif current_pos[0] > end_pos[0]:
                     self.emulator.press_buttons(["left"], wait=True)
                     current_pos = (current_pos[0] - 1, current_pos[1])
-                    result_parts.append(f"Moved left to {current_pos}")
                 elif current_pos[1] < end_pos[1]:
                     self.emulator.press_buttons(["down"], wait=True)
                     current_pos = (current_pos[0], current_pos[1] + 1)
-                    result_parts.append(f"Moved down to {current_pos}")
                 elif current_pos[1] > end_pos[1]:
                     self.emulator.press_buttons(["up"], wait=True)
                     current_pos = (current_pos[0], current_pos[1] - 1)
-                    result_parts.append(f"Moved up to {current_pos}")
 
             # Press A to select END
             self.emulator.press_buttons(["a"], wait=True)
             result_parts.append("Selected END to complete input")
 
         return {"role": "tool", "tool_call_id": tool_call.id, "content": "\n".join(result_parts)}
+
+
+class WriteToMemoryTool(Tool):
+    """Tool for tracking memory in a text file."""
+
+    name = "write_to_memory"
+    description = "Save information to a memory file for later reference. Useful for tracking important game events, locations, or other information you want to remember."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "The information to save to the memory file."},
+            "category": {
+                "type": "string",
+                "description": "Optional category to organize the memory (e.g., 'badges', 'pokemon_team', 'items', 'key_npcs', 'gym_leaders', 'routes', 'towns', 'pokedex').",
+                "default": "general",
+            },
+        },
+        "required": ["content"],
+        "additionalProperties": False,
+    }
+
+    def __init__(self, emulator):
+        """Initialize the memory tool."""
+        super().__init__(emulator)
+        # If the file exists, back it up first
+        if os.path.exists(MEMORY_FILE):
+            os.rename(MEMORY_FILE, f"{MEMORY_FILE}.old")
+        # Create a new file
+        with open(MEMORY_FILE, "w") as f:
+            f.write("# Agent Memory File\n\n")
+
+    def process(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
+        """Process a memory_tracker tool call."""
+        tool_input = json.loads(tool_call.function.arguments)
+        content = tool_input["content"]
+        category = tool_input.get("category", "general")
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        memory_entry = f"[{timestamp}] [{category}] {content}\n"
+
+        # Append to the memory file
+        with open(MEMORY_FILE, "a") as f:
+            f.write(memory_entry)
+
+        logger.info(f"[Memory] Added: [{category}] {content}")
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": f"Memory saved: {content} (category: {category})",
+        }
+
+
+def read_memory() -> str:
+    """Read the entire memory file and return its contents without comments."""
+    if not os.path.exists(MEMORY_FILE):
+        return "Memory file does not exist or is empty."
+    with open(MEMORY_FILE, "r") as f:
+        lines = f.readlines()
+    memory_content = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+    return "\n".join(memory_content)
+
+
+class NavigationalHintsTool(Tool):
+    """Tool for getting navigational hints based on the current location."""
+
+    name = "get_navigational_hints"
+    description = "Get navigational hints and information about the current location to help with exploration and navigation. Call this when stuck. It is recommended to record hints in your memory."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "The current location name (e.g., 'PLAYERS HOUSE 2F', 'VIRIDIAN CITY'). If not provided, the tool will read the current location from memory.",
+                "default": None,
+            },
+        },
+        "additionalProperties": False,
+    }
+
+    # Location-based navigation hints
+    LOCATION_HINTS = {
+        # Specifically provided hints
+        "PLAYERS HOUSE 2F": "This is your bedroom. You can use the PC to access your storage. The stairs are in the top-right corner of the room.",
+        # Generic descriptions for locations
+        "PLAYERS HOUSE 1F": "This is the ground floor of your house. Your mom is usually here. The door leads outside to PALLET TOWN.",
+        "PALLET TOWN": "A small town with two houses and Professor Oak's Lab to the south. Route 1 is to the north.",
+        "OAKS LAB": "Professor Oak's research lab. This is where you can get your starter Pokémon and Pokédex. The door is at the bottom of the room.",
+        "VIRIDIAN CITY": "The first major city north of Pallet Town. Has a Pokémon Center, Poké Mart, and Gym (which opens later).",
+        "VIRIDIAN FOREST": "A dense forest maze with many Bug Catchers and bug-type Pokémon. Leads to Pewter City.",
+        "PEWTER CITY": "Home to the first Gym led by Brock who specializes in Rock-type Pokémon.",
+        "PEWTER GYM": "Brock's Gym specializing in Rock-type Pokémon. Defeat him to earn the Boulder Badge.",
+        "POKEMON CENTER": "Heal your Pokémon here for free. Also contains a PC to access storage and a link cable station.",
+        "POKEMART": "Shop selling Poké Balls, Potions, and other useful items.",
+        "ROUTE 1": "Connects Pallet Town to Viridian City. Contains wild Pidgey and Rattata.",
+        "ROUTE 2": "Connects Viridian City to Pewter City through Viridian Forest.",
+        "ROUTE 3": "East of Pewter City, leads to Mt. Moon. Many trainers here.",
+        "MT MOON": "A large cave system with multiple floors. Home to many Zubat and the rare Clefairy.",
+        "CERULEAN CITY": "City east of Mt. Moon. Has the second Gym led by Misty who specializes in Water-type Pokémon.",
+        "CERULEAN GYM": "Misty's Gym specializing in Water-type Pokémon. Defeat her to earn the Cascade Badge.",
+        "BILLS HOUSE": "Home of Bill, the Pokémon storage system developer. Located north of Cerulean City on Route 25.",
+        "VERMILION CITY": "Port city with the S.S. Anne and the third Gym led by Lt. Surge.",
+        "SS ANNE": "A luxury cruise ship docked in Vermilion City. Contains many trainers and a key item.",
+        "VERMILION GYM": "Lt. Surge's Gym specializing in Electric-type Pokémon. Defeat him to earn the Thunder Badge.",
+    }
+
+    def process(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
+        """Process a get_navigational_hints tool call."""
+        tool_input = json.loads(tool_call.function.arguments)
+        location = tool_input.get("location")
+
+        # If location not provided, read from memory
+        if not location:
+            memory_dict, location, _ = self.emulator.get_state_from_memory()
+            if not location:
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": "Could not determine current location.",
+                }
+
+        # Normalize location name
+        location = location.upper().strip()
+
+        # Get hint for the location
+        hint = self.LOCATION_HINTS.get(location)
+        result = f"Hint for {location}:\n{hint}" if hint else f"No hints available for '{location}'."
+        logger.info(f"[Navigation Hint] For location: {location}")
+        return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
 
 
 class ToolFactory:
@@ -317,17 +411,18 @@ class ToolFactory:
         """Initialize the factory with an emulator instance."""
         self.emulator = emulator
         self.tools = {
-            "press_button": PressButtonTool(emulator),
-            "navigate_to_coordinates": NavigateToCoordinatesTool(emulator),
-            "navigate_using_dead_reckoning": DeadReckoningNavigationTool(emulator),
+            "press_buttons": PressButtonsTool(emulator),
+            "navigate_to_screen_coordinates": NavigateToScreenCoordinatesTool(emulator),
             "on_screen_keyboard_input": OnScreenKeyboardTool(emulator),
+            "write_to_memory": WriteToMemoryTool(emulator),
+            "get_navigational_hints": NavigationalHintsTool(emulator),
         }
 
         logger.info("Available tools:")
         for tool in self.get_available_tools():
             logger.info(f"- {tool['function']['name']}: {tool['function']['description']}")
 
-    def process_tool_call(self, tool_call) -> ChatCompletionToolMessageParam:
+    def process_tool_call(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
         tool_name = tool_call.function.name
         logger.info(f"Processing tool call: {tool_name}")
         tool = self.tools[tool_name]

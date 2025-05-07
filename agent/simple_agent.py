@@ -10,12 +10,13 @@ from openai.types.chat import (
     ChatCompletionMessage,
     ChatCompletionMessageParam,
     ChatCompletionSystemMessageParam,
+    ChatCompletionUserMessageParam,
 )
 from PIL import Image, ImageDraw
 
 from agent.emulator import Emulator
 from agent.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
-from agent.tools import ToolFactory
+from agent.tools import ToolFactory, read_memory
 from config import MAX_TOKENS, MODEL_NAME, TEMPERATURE
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -86,19 +87,58 @@ def get_screenshot_base64(emulator: Emulator, screenshot: Image.Image, upscale=1
         for y in range(0, shape[1], shape[1] // 9):
             ImageDraw.Draw(screenshot).line(((0, y), (shape[0] - 1, y)), fill=(255, 0, 0))
 
-        # # add coordinate labels
-        # # Add grid coordinates with nested loops (10 columns x 9 rows)
-        # for col in range(10):
-        #     x = col * (shape[0] // 10)
-        #     for row in range(9):
-        #         y = row * (shape[1] // 9)
-        #         # Draw (col, row) at every cell
-        #         ImageDraw.Draw(screenshot).text((x + 2, y + 2), f"({col}, {row})", fill=(255, 0, 0))
-
     screenshot.save("screenshot_test.png")
     buffered = io.BytesIO()
     screenshot.save(buffered, format="PNG")
     return base64.standard_b64encode(buffered.getvalue()).decode()
+
+
+def create_user_message_with_game_state(
+    prefix_content: str | None = None,
+    screenshot_b64: str | None = None,
+    memory_info: dict | None = None,
+    collision_map: str | None = None,
+    memories: str | None = None,
+    suffix_content: str | None = None,
+) -> ChatCompletionUserMessageParam:
+    """Create a user message with game state data, ensuring no empty content parts."""
+    content_parts = []
+
+    if prefix_content:
+        content_parts.append({"type": "text", "text": prefix_content})
+
+    if screenshot_b64:
+        content_parts.append({"type": "text", "text": "Here is a screenshot of the screen:\n"})
+        content_parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}})
+
+    if memory_info:
+        content_parts.append(
+            {
+                "type": "text",
+                "text": f"\nGame state information:\n{json.dumps(memory_info, indent=2)}",
+            }
+        )
+
+    if memories:
+        content_parts.append(
+            {
+                "type": "text",
+                "text": f"\nYour recorded memories:\n{memories}",
+            }
+        )
+
+    if collision_map:
+        content_parts.append(
+            {
+                "type": "text",
+                "text": f"\nText-based map:\n{collision_map}",
+            }
+        )
+
+    if suffix_content:
+        content_parts.append({"type": "text", "text": suffix_content})
+
+    return {"role": "user", "content": content_parts}
 
 
 class SimpleAgent:
@@ -143,20 +183,14 @@ class SimpleAgent:
         self._save_web_screenshot()
 
         screenshot_b64, memory_info, collision_map = self._get_post_action_data()
-        self.message_history = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "You may now begin playing.\n"},
-                    {"type": "text", "text": "Here is a screenshot of the screen:\n"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
-                    {
-                        "type": "text",
-                        "text": f"\nGame state information from memory:\n{json.dumps(memory_info, indent=2)}",
-                    },
-                ],
-            }
-        ]
+
+        initial_message = create_user_message_with_game_state(
+            prefix_content="You may now begin playing.\n",
+            screenshot_b64=screenshot_b64,
+            memory_info=memory_info,
+            collision_map=collision_map,
+        )
+        self.message_history = [initial_message]
 
     def _get_post_action_data(self):
         """Get screenshot and game state after an action."""
@@ -202,7 +236,7 @@ class SimpleAgent:
                 messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)
 
                 logger.info(f"---------- Messages ({len(messages)}) -----------")
-                pretty_print_messages(messages)
+                pretty_print_messages(messages[-5:])
                 logger.info("-------------------------------------------")
 
                 response = self.client.chat.completions.create(
@@ -236,20 +270,16 @@ class SimpleAgent:
 
                 # Add user message with screenshot and memory info
                 screenshot_b64, memory_info, collision_map = self._get_post_action_data()
-                self.message_history.append(
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Time to take your next action!\n"},
-                            {"type": "text", "text": "Here is a screenshot of the screen:\n"},
-                            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{screenshot_b64}"}},
-                            {
-                                "type": "text",
-                                "text": f"\nGame state information from memory:\n{json.dumps(memory_info, indent=2)}",
-                            },
-                        ],
-                    }
+                memories = read_memory()
+                user_message = create_user_message_with_game_state(
+                    prefix_content="Time to take your next action!",
+                    screenshot_b64=screenshot_b64,
+                    memory_info=memory_info,
+                    collision_map=collision_map,
+                    memories=memories,
                 )
+
+                self.message_history.append(user_message)
 
                 # Check if we need to summarize the history
                 if len(self.message_history) >= self.max_history:
@@ -278,7 +308,12 @@ class SimpleAgent:
         logger.info("[Agent] Generating conversation summary...")
 
         messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)
-        messages.append({"role": "user", "content": [{"type": "text", "text": SUMMARY_PROMPT}]})
+
+        # Add summary prompt with validation to ensure no empty content
+        summary_prompt = SUMMARY_PROMPT.strip()
+        if summary_prompt:  # Make sure we don't add empty prompt
+            messages.append({"role": "user", "content": [{"type": "text", "text": summary_prompt}]})
+
         system_message: ChatCompletionSystemMessageParam = {"role": "system", "content": SYSTEM_PROMPT}
         summary_api_messages = [system_message] + messages
 
@@ -292,27 +327,26 @@ class SimpleAgent:
         logger.info("[Agent] Game Progress Summary:")
         logger.info(f"{summary_text}")
 
-        summary_screenshot = self.emulator.get_screenshot()
-        summary_screenshot_b64 = get_screenshot_base64(self.emulator, summary_screenshot, upscale=2)
+        screenshot_b64, memory_info, collision_map = self._get_post_action_data()
+        memories = read_memory()
+        prefix_content = (
+            f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}"
+        )
+        suffix_content = (
+            "\nYou were just asked to summarize your playthrough so far, which is the summary you see above. "
+            "You may now continue playing by selecting your next action."
+        )
+        user_message = create_user_message_with_game_state(
+            prefix_content=prefix_content,
+            screenshot_b64=screenshot_b64,
+            memory_info=memory_info,
+            collision_map=collision_map,
+            memories=memories,
+            suffix_content=suffix_content,
+        )
 
         # Seed the new history after summarization
-        self.message_history: list[ChatCompletionMessageParam] = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}",
-                    },
-                    {"type": "text", "text": "\nCurrent game screenshot for reference:\n"},
-                    {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{summary_screenshot_b64}"}},
-                    {
-                        "type": "text",
-                        "text": "\nYou were just asked to summarize your playthrough so far, which is the summary you see above. You may now continue playing by selecting your next action.",
-                    },
-                ],
-            }
-        ]
+        self.message_history = [user_message]
 
         logger.info("[Agent] Message history condensed into summary.")
         self._save_web_screenshot()

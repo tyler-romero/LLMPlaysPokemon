@@ -61,9 +61,6 @@ class Tileset(IntEnum):
     PLATEAU = 0x17
 
 
-from enum import IntEnum
-
-
 class PokemonType(IntEnum):
     NORMAL = 0x00
     FIGHTING = 0x01
@@ -734,6 +731,20 @@ class PokemonRedReader:
     def __init__(self, memory_view):
         """Initialize with a PyBoy memory view object"""
         self.memory = memory_view
+
+    def get_warps(self) -> list[tuple[int, int]]:
+        """Get all the warps listed for the current map.
+
+        Credit to:
+        https://github.com/cicero225/llm_pokemon_scaffold/blob/master/agent/memory_reader.py#L738
+        """
+        # This is the number of warps
+        num_warps = self.memory[0xD3AE]
+        # Each warp now comes in groups of 4, row col of location on this map and row col of where it goes in the _next_ map
+        warps = []  # this could be a set, but for something like this let's keep it simpler.
+        for n in range(num_warps):  # turning this to col, row
+            warps.append((self.memory[0xD3AF + n * 4 + 1], self.memory[0xD3AF + n * 4]))
+        return warps
 
     def read_in_combat(self) -> bool:
         """Are we in combat?"""
