@@ -14,81 +14,66 @@ from openai.types.chat import (
     ChatCompletionToolParam,
     ChatCompletionUserMessageParam,
 )
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from agent.emulator import Emulator
 from agent.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
-from agent.tools import ToolFactory, read_memory
+from agent.tools import ToolFactory, read_knowledge_base
 from config import MAX_TOKENS, MODEL_NAME, TEMPERATURE
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def pretty_print_messages(messages: list[ChatCompletionMessageParam]):
-    for message in messages:
-        if isinstance(message, dict):
-            # Handle dictionary-style messages
-            if message["role"] == "user":
-                content = message["content"]
-                if isinstance(content, list):
-                    for part in content:
-                        if part.get("type") == "text":
-                            logger.info(f"[User] {part['text']}")
-                        elif part.get("type") == "image_url":
-                            logger.info("[User] [Screenshot]")
-                else:
-                    logger.info(f"[User] {content}")
-            elif message["role"] == "assistant":
-                logger.info(f"[Assistant] {message.get('content', '')}")
-                if tool_calls := message.get("tool_calls"):
-                    for tool_call in tool_calls:
-                        tool_name = tool_call.get("function", {}).get("name", "unknown")
-                        tool_args = tool_call.get("function", {}).get("arguments", "{}")
-                        logger.info(f"[Tool Call] {tool_name}({tool_args})")
-            elif message["role"] == "tool":
-                logger.info(f"[Tool Response] {message.get('content', '')}")
-            else:
-                logger.info(f"[{message['role'].capitalize()}] {message.get('content', '')}")
-        else:
-            # Handle ChatCompletionMessage objects
-            if message.role == "user":
-                content = message.content
-                if isinstance(content, list):
-                    for part in content:
-                        if part.type == "text":
-                            logger.info(f"[User] {part.text}")
-                        elif part.type == "image_url":
-                            logger.info("[User] [Screenshot]")
-                else:
-                    logger.info(f"[User] {content}")
-            elif message.role == "assistant":
-                logger.info(f"[Assistant] {message.content or ''}")
-                if hasattr(message, "tool_calls") and message.tool_calls:
-                    for tool_call in message.tool_calls:
-                        tool_name = tool_call.function.name if hasattr(tool_call, "function") else "unknown"
-                        tool_args = tool_call.function.arguments if hasattr(tool_call, "function") else "{}"
-                        logger.info(f"[Tool Call] {tool_name}({tool_args})")
-            elif message.role == "tool":
-                logger.info(f"[Tool Response] {message.content or ''}")
-            else:
-                logger.info(f"[{message.role.capitalize()}] {message.content or ''}")
-
-
-def get_screenshot_base64(emulator: Emulator, screenshot: Image.Image, upscale=1):
+def get_screenshot_base64(emulator: Emulator, screenshot: Image.Image, upscale: int = 3):
     """Convert PIL image to base64 string."""
     if upscale > 1:
         new_size = (screenshot.width * upscale, screenshot.height * upscale)
+        logger.info(f"[Screenshot] Upscaling from {screenshot.size} to {new_size}")
         screenshot = screenshot.resize(new_size)
 
     if not emulator.get_in_combat():
         shape = screenshot.size
-        # draw grid lines
-        for x in range(0, shape[0], shape[0] // 10):
+        player_x, player_y = emulator.get_coordinates()  # absolute coordinates
+
+        cell_width = shape[0] // 10
+        cell_height = shape[1] // 9
+
+        # Draw grid lines
+        for x in range(0, shape[0], cell_width):
             ImageDraw.Draw(screenshot).line(((x, 0), (x, shape[1] - 1)), fill=(255, 0, 0))
-        for y in range(0, shape[1], shape[1] // 9):
+        for y in range(0, shape[1], cell_height):
             ImageDraw.Draw(screenshot).line(((0, y), (shape[0] - 1, y)), fill=(255, 0, 0))
+
+        # Add coordinates to every other tile
+        font = ImageFont.load_default()
+        for grid_y in range(9):
+            for grid_x in range(10):
+                # Calculate the relative coordinates
+                rel_x = grid_x - 4 + player_x
+                rel_y = grid_y - 4 + player_y
+
+                if not (grid_x == 4 and grid_y == 4):
+                    # Calculate position for text
+                    text_x = grid_x * cell_width + 2
+                    text_y = grid_y * cell_height + 2
+
+                    # Create coordinate text
+                    coord_text = f"({rel_x},{rel_y})"
+
+                    # Add yellow background for text
+                    text_width, text_height = (
+                        font.getsize(coord_text)
+                        if hasattr(font, "getsize")
+                        else ImageDraw.Draw(screenshot).textbbox((0, 0), coord_text, font=font)[2:4]
+                    )
+                    ImageDraw.Draw(screenshot).rectangle(
+                        [(text_x, text_y), (text_x + text_width, text_y + text_height)], fill=(255, 255, 0)
+                    )
+
+                    # Draw text
+                    ImageDraw.Draw(screenshot).text((text_x, text_y), coord_text, fill=(0, 0, 0), font=font)
 
     screenshot.save("screenshot_test.png")
     buffered = io.BytesIO()
@@ -101,7 +86,7 @@ def create_user_message_with_game_state(
     screenshot_b64: str | None = None,
     memory_info: dict | None = None,
     collision_map: str | None = None,
-    memories: str | None = None,
+    knowledge_base: str | None = None,
     suffix_content: str | None = None,
 ) -> ChatCompletionUserMessageParam:
     """Create a user message with game state data, ensuring no empty content parts."""
@@ -118,15 +103,15 @@ def create_user_message_with_game_state(
         content_parts.append(
             {
                 "type": "text",
-                "text": f"\nGame state information:\n{json.dumps(memory_info, indent=2)}",
+                "text": f"\nGame state information from memory:\n{json.dumps(memory_info, indent=2)}",
             }
         )
 
-    if memories:
+    if knowledge_base:
         content_parts.append(
             {
                 "type": "text",
-                "text": f"\nYour recorded memories:\n{memories}",
+                "text": f"\nYour recorded knowledge base:\n{knowledge_base}",
             }
         )
 
@@ -166,7 +151,7 @@ class SimpleAgent:
             load_state: Path to a saved state file to load
             web_output_dir: Directory to save latest.png for web viewing
         """
-        self.emulator = Emulator(rom_path, headless, sound)
+        self.emulator = Emulator(rom_path, headless, sound=sound)
         self.emulator.initialize()  # Initialize the emulator
         self.tool_factory = ToolFactory(self.emulator)
 
@@ -214,8 +199,8 @@ class SimpleAgent:
         ),
         reraise=True,
         before_sleep=lambda retry_state: logger.warning(
-            f"{retry_state.outcome.exception()}: Retrying request to /chat/completions "   # type: ignore
-            f"in {retry_state.next_action.sleep} seconds"    # type: ignore
+            f"{retry_state.outcome.exception()}: Retrying request to /chat/completions "  # type: ignore
+            f"in {retry_state.next_action.sleep} seconds"  # type: ignore
         ),
     )
     def _get_chat_completion(
@@ -228,16 +213,18 @@ class SimpleAgent:
 
     def _get_post_action_data(self):
         """Get screenshot and game state after an action."""
-        screenshot = self.emulator.get_screenshot()
-        screenshot_b64 = get_screenshot_base64(self.emulator, screenshot, upscale=2)
-        memory_info, location, coords = self.emulator.get_state_from_memory()
         collision_map = self.emulator.get_collision_map()
+        screenshot = self.emulator.get_screenshot()
+        screenshot_b64 = get_screenshot_base64(self.emulator, screenshot)
+        memory_info, location, coords = self.emulator.get_state_from_memory()
 
         logger.info("[Memory State after action]")
         logger.info(memory_info)
         if collision_map:
             logger.info(f"[Collision Map after action]\n{collision_map}")
-
+            with open("collision_map.txt", "w") as f:
+                f.write(collision_map)
+            logger.debug("Collision map saved to collision_map.txt")
         return screenshot_b64, memory_info, collision_map
 
     def _save_web_screenshot(self):
@@ -268,15 +255,10 @@ class SimpleAgent:
         while self.running and steps_completed < num_steps:
             try:
                 messages: list[ChatCompletionMessageParam] = copy.deepcopy(self.message_history)  # type: ignore
-
-                logger.info(f"---------- Messages ({len(messages)}) -----------")
-                pretty_print_messages(messages[-5:])
-                logger.info("-------------------------------------------")
-
                 response = self._get_chat_completion(messages, self.tool_factory.get_available_tools())
                 logger.info(f"Agent response usage: {response.usage}")
 
-                # Add the assistant's message to the message history
+                # Add response to message history
                 assistant_message: ChatCompletionMessage = response.choices[0].message
                 self.message_history.append(assistant_message)  # type: ignore
 
@@ -286,7 +268,7 @@ class SimpleAgent:
                 else:
                     logger.info("[No Text] No text response from model")
 
-                # Extract tool calls
+                # Process tool calls
                 tool_calls = assistant_message.tool_calls or []
                 for tool_call in tool_calls:
                     logger.info(f"[Tool] Using tool {tool_call.function.name} with args {tool_call.function.arguments}")
@@ -296,15 +278,15 @@ class SimpleAgent:
                 if not tool_calls:
                     logger.info("[No Tool] No tool calls made")
 
-                # Add user message with screenshot and memory info
+                # Add new user message with screenshot and memory info
                 screenshot_b64, memory_info, collision_map = self._get_post_action_data()
-                memories = read_memory()
+                knowledge_base = read_knowledge_base()
                 user_message = create_user_message_with_game_state(
                     prefix_content="Time to take your next action!",
                     screenshot_b64=screenshot_b64,
                     memory_info=memory_info,
                     collision_map=collision_map,
-                    memories=memories,
+                    knowledge_base=knowledge_base,
                 )
 
                 self.message_history.append(user_message)
@@ -353,7 +335,7 @@ class SimpleAgent:
         logger.info(f"{summary_text}")
 
         screenshot_b64, memory_info, collision_map = self._get_post_action_data()
-        memories = read_memory()
+        knowledge_base = read_knowledge_base()
         prefix_content = (
             f"CONVERSATION HISTORY SUMMARY (representing {self.max_history} previous messages): {summary_text}"
         )
@@ -366,7 +348,7 @@ class SimpleAgent:
             screenshot_b64=screenshot_b64,
             memory_info=memory_info,
             collision_map=collision_map,
-            memories=memories,
+            knowledge_base=knowledge_base,
             suffix_content=suffix_content,
         )
 

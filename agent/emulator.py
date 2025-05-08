@@ -26,6 +26,7 @@ class Emulator:
                 rom_path,
                 cgb=True,
                 sound=sound,
+                sound_volume=50 if sound else 0,
             )
 
     def tick(self, frames):
@@ -197,7 +198,7 @@ class Emulator:
         # Reshape to group 2x2 blocks and take mean
         return arr.reshape(9, 2, 10, 2).mean(axis=(1, 3))
 
-    def get_collision_map(self):
+    def get_collision_map(self) -> str:
         """
         Creates a simple ASCII map showing player position, direction, terrain, warps, and sprites.
         Returns:
@@ -593,14 +594,14 @@ class Emulator:
         memory_dict["rival"] = rival_name
         memory_dict["money"] = f"${reader.read_money()}"
         memory_dict["location"] = location
-        # memory_dict["map_coordinates"] = coords
+        memory_dict["map_coordinates"] = coords
         memory_dict["valid_moves"] = valid_moves if valid_moves and not dialog else []
         memory_dict["badges"] = reader.read_badges()
 
         # Inventory
-        memory_dict["inventory"] = []
+        memory_dict["inventory"] = {}
         for item, qty in reader.read_items():
-            memory_dict["inventory"].append({"item": item, "quantity": qty})
+            memory_dict["inventory"][item] = qty
 
         # Party Pokemon
         memory_dict["pokemon_party"] = []
@@ -618,7 +619,7 @@ class Emulator:
             for move, pp in zip(pokemon.moves, pokemon.move_pp, strict=True):
                 pokemon_dict["moves"].append({"name": move, "pp": pp})
 
-            memory_dict["party"].append(pokemon_dict)
+            memory_dict["pokemon_party"].append(pokemon_dict)
 
         return memory_dict, location, coords
 
