@@ -338,6 +338,110 @@ def read_knowledge_base() -> str:
     return "\n".join(knowledge_base_content)
 
 
+class AgenticMemoryTool(Tool):
+    """Tool for managing an agentic memory system with ChromaDB backend."""
+
+    name = "agentic_memory"
+    description = "Manage an agentic memory system with advanced retrieval and evolution capabilities. Supports adding, retrieving, updating, and deleting memories."
+    parameters = {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "description": "The operation to perform on the memory system.",
+                "enum": ["add", "retrieve", "update", "delete"],
+            },
+            "content": {
+                "type": "string",
+                "description": "The memory content to add or update. Required for 'add' and 'update' operations.",
+            },
+            "memory_id": {
+                "type": "string",
+                "description": "The ID of the memory to retrieve, update, or delete. Required for 'retrieve', 'update', and 'delete' operations.",
+            },
+            "query": {
+                "type": "string",
+                "description": "The search query for retrieving relevant memories. Can be used with 'retrieve' operation.",
+            },
+            "category": {
+                "type": "string",
+                "description": "Optional category to organize memories (e.g., 'observations', 'plans', 'reflections').",
+                "default": "general",
+            },
+        },
+        "required": ["operation"],
+        "additionalProperties": False,
+    }
+
+    def process(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
+        """Process an agentic_memory tool call."""
+        tool_input = json.loads(tool_call.function.arguments)
+        operation = tool_input["operation"]
+        content = tool_input.get("content")
+        memory_id = tool_input.get("memory_id")
+        query = tool_input.get("query")
+        category = tool_input.get("category", "general")
+
+        if operation == "add":
+            if not content:
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": "Error: Content is required for add operation",
+                }
+            # Placeholder for add operation logic
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": f"Memory added: {content} (category: {category})",
+            }
+        elif operation == "retrieve":
+            if not memory_id and not query:
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": "Error: Either memory_id or query is required for retrieve operation",
+                }
+            # Placeholder for retrieve operation logic
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "Retrieve operation not implemented yet.",
+            }
+        elif operation == "update":
+            if not memory_id or not content:
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": "Error: memory_id and content are required for update operation",
+                }
+            # Placeholder for update operation logic
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "Update operation not implemented yet.",
+            }
+        elif operation == "delete":
+            if not memory_id:
+                return {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": "Error: memory_id is required for delete operation",
+                }
+            # Placeholder for delete operation logic
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": "Delete operation not implemented yet.",
+            }
+        else:
+            return {
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": f"Error: Unsupported operation '{operation}'.",
+            }
+
+
 class NavigationalHintsTool(Tool):
     """Tool for getting navigational hints based on the current location."""
 
