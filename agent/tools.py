@@ -44,7 +44,7 @@ class PressButtonTool(Tool):
     """Tool for pressing a button on the Game Boy."""
 
     name = "press_button"
-    description = "Press a button on the Game Boy. In Pokemon Red, the arrow keys are used move the player or cursor. The 'a' button is used to confirm decision, talk or read, advance dialogue, etc. The 'b' button is used to cancel decisions, close menus, etc. The 'start' button is used to open the overworld menu."
+    description = "Press a button on the Game Boy. In Pokemon Red, the arrow keys are used to move the player or cursor. The 'a' button is used to confirm decision, talk or read, advance dialogue, etc. The 'b' button is used to cancel decisions, close menus, etc. The 'start' button is used to open the overworld menu."
     parameters = {
         "type": "object",
         "properties": {
