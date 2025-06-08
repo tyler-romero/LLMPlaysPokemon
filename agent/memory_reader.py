@@ -252,7 +252,7 @@ class Pokemon(IntEnum):
     NIDORINA = 0xA8
     GEODUDE = 0xA9
     PORYGON = 0xAA
-    AERODACTYL = 0xABAA
+    AERODACTYL = 0xAB
     MISSINGNO_AC = 0xAC
     MAGNEMITE = 0xAD
     MISSINGNO_AE = 0xAE
