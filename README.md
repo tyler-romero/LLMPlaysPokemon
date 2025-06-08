@@ -30,7 +30,7 @@ python main.py
 
 Optional arguments:
 - `--rom`: Path to the Pokemon ROM file (default: `pokemon.gb` in the root directory)
-- `--steps`: Number of agent steps to run (default: 10)
+- `--steps`: Number of agent steps to run (default: 250)
 - `--display`: Run with display (not headless)
 - `--sound`: Enable sound (only applicable with display)
 
