@@ -216,7 +216,7 @@ class OnScreenKeyboardTool(Tool):
         """Process a keyboard_input tool call."""
         tool_input = json.loads(tool_call.function.arguments)
         text = tool_input["text"]
-        end_input = tool_input.get("end_input", False)
+        end_input = tool_input.get("end_input", True)
 
         logger.info(f"[Keyboard] Inputting text: '{text}' (end_input={end_input})")
 
