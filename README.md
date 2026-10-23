@@ -13,13 +13,13 @@ A minimal implementation of an LLM playing Pokemon Red using the PyBoy emulator.
    ```
    uv sync
    ```
-3. Choose a provider, model, and API by editing `SIMPLE_AGENT_LLM` in `config.py` (see [Supported LLM endpoints](#supported-llm-endpoints))
+3. Choose a provider, model, and API by editing `SIMPLE_AGENT_LLM` in `pokemon_agent/config.py` (see [Supported LLM endpoints](#supported-llm-endpoints))
 4. Place your Pokemon Red ROM file in the root directory as `pokemon.gb` (you need to provide your own ROM)
 
 ## Supported LLM Endpoints
 
 All models are called through the OpenAI Python SDK with tool calling. Each agent's LLM is an `LLMConfig`
-(`agent/llm_client.py`); select the endpoint with `provider` and the API with `api`:
+(`pokemon_agent/llm/client.py`); select the endpoint with `provider` and the API with `api`:
 
 | `provider` | Endpoint | Supported `api` values | Required setup |
 |---|---|---|---|
@@ -44,7 +44,7 @@ Run `./start_vllm.sh --help` for all options. `model` must match the model serve
 ### Simple agent (`--agent simple`)
 
 Calls the configured LLM directly, keeps its own message history, and summarizes it every `--max-history` messages.
-Configure its LLM with `SIMPLE_AGENT_LLM` in `config.py`.
+Configure its LLM with `SIMPLE_AGENT_LLM` in `pokemon_agent/config.py`.
 
 ### Copilot SDK agent (`--agent copilot`)
 
@@ -55,7 +55,7 @@ tools within a step, and the step ends after a game action (`press_button`, `nav
 model; the SDK's built-in tools are disabled.
 
 It uses a GitHub Copilot-hosted model with your existing Copilot login; no API key is needed. Configure it with
-`COPILOT_AGENT` in `config.py`. Choose the model per run with `--model <copilot-model-id>`; without it, Copilot's default
+`COPILOT_AGENT` in `pokemon_agent/config.py`. Choose the model per run with `--model <copilot-model-id>`; without it, Copilot's default
 model is used. The model must support image input.
 
 The SDK downloads its runtime on first use (or run `uv run python -m copilot download-runtime` ahead of time).
@@ -73,10 +73,10 @@ of the memory directory next to it (`<state file>.memories/`), and `--load-state
 
 ## Usage
 
-Run the main script:
+Run the CLI (or `uv run python main.py`, which is equivalent):
 
 ```
-uv run python main.py
+uv run pokemon-agent
 ```
 
 Optional arguments:
@@ -85,7 +85,7 @@ Optional arguments:
 - `--display`: Run with display (not headless)
 - `--sound`: Enable sound (only applicable with display)
 - `--agent`: Agent to run: `simple` or `copilot` (default: `simple`)
-- `--model`: Model to use, overriding the agent's model in `config.py`
+- `--model`: Model to use, overriding the agent's model in `pokemon_agent/config.py`
 - `--max-history`: Maximum number of messages in history before summarization, for the `simple` agent (default: 30)
 - `--save-every`: Number of steps between save states (default: 100)
 - `--load-state`: Path to a saved state to load
@@ -93,24 +93,34 @@ Optional arguments:
 
 Example:
 ```
-uv run python main.py --rom pokemon.gb --steps 20 --display --sound
+uv run pokemon-agent --rom pokemon.gb --steps 20 --display --sound
 ```
 
 ## Implementation Details
 
 ### Components
 
-- `agent/base_agent.py`: `BaseAgent` with shared emulator, tool, observation, and save-state handling
-- `agent/simple_agent.py`: `SimpleAgent`, which manages its own history and summaries over an OpenAI-compatible API
-- `agent/copilot_agent.py`: `CopilotAgent`, which runs on a GitHub Copilot SDK session
-- `agent/tools.py`: Tool definitions exposed to the LLM
-- `agent/memory.py`: File-based memory store and memory tool definitions
-- `agent/prompts.py`: System and summarization prompts
-- `agent/emulator.py`: Wrapper around PyBoy with helper functions
-- `agent/memory_reader.py`: Extracts game state information from emulator memory
-- `agent/llm_client.py`: Provider clients and Chat Completions/Responses API adapters
-- `config.py`: Per-agent LLM configuration
-- `main.py`: CLI and the `AGENT_BUILDERS` registry
+Everything lives in the `pokemon_agent` package. Dependencies flow downward: agents use tools, memory, and LLM
+clients; tools use the game; the game knows nothing about LLMs.
+
+- `game/`: The Pokemon Red environment
+  - `emulator.py`: Wrapper around PyBoy with helper functions
+  - `memory_reader.py`: Extracts game state information from emulator memory
+  - `observation.py`: Screenshot grid annotation and the per-step `GameObservation`
+- `tools/`: Tools exposed to the model; each implements `execute(tool_input: dict) -> str` with no LLM SDK types
+  - `base.py`: `Tool` base class
+  - `game_tools.py`: `press_button`, `navigate_to_screen_coordinates`, `on_screen_keyboard_input`
+  - `memory_tools.py`: `view`, `create`, `edit`, `delete`, `rename` over `/memories`
+  - `factory.py`: Tool registry and `ToolFactory`
+- `memory/store.py`: File-based memory store, tool schemas, and save-state snapshots
+- `llm/client.py`: `LLMConfig` and Chat Completions/Responses API adapters
+- `agents/`: Agents and prompts
+  - `base.py`: `BaseAgent` with shared emulator, tool, observation, memory, and save-state handling
+  - `simple.py`: `SimpleAgent`, which manages its own history and summaries over an OpenAI-compatible API
+  - `copilot.py`, `copilot_config.py`: `CopilotAgent`, which runs on a GitHub Copilot SDK session, and its settings
+  - `prompts.py`: System and summarization prompts
+- `config.py`: Per-agent configuration
+- `cli.py`: CLI and the `AGENT_BUILDERS` registry
 
 ### How It Works
 
@@ -125,6 +135,6 @@ uv run python main.py --rom pokemon.gb --steps 20 --display --sound
 1. Subclass `BaseAgent` and implement `run(num_steps) -> int`. Use `self.observe()` for the annotated screenshot and
    game state, `self.tool_factory` to run tools, and `self._on_step_complete(...)` after each step.
 2. Optionally set `tool_names` on the class to choose its tools (defaults to `DEFAULT_TOOL_NAMES` in
-   `agent/tools.py`). Tools implement `execute(tool_input: dict) -> str` and don't depend on an LLM SDK.
-3. Add its settings (e.g. an `LLMConfig`) to `config.py` and a builder to `AGENT_BUILDERS` in `main.py`, then run it
-   with `--agent <name>`.
+   `pokemon_agent/tools/factory.py`).
+3. Add its settings (e.g. an `LLMConfig`) to `pokemon_agent/config.py` and a builder to `AGENT_BUILDERS` in
+   `pokemon_agent/cli.py`, then run it with `--agent <name>`.

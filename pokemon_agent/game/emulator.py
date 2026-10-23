@@ -8,7 +8,7 @@ import time
 from PIL import Image
 from pyboy import PyBoy
 
-from agent.memory_reader import PokemonRedReader, StatusCondition
+from pokemon_agent.game.memory_reader import PokemonRedReader, StatusCondition
 
 logger = logging.getLogger(__name__)
 

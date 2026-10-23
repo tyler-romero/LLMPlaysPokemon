@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from dataclasses import dataclass
 
 from copilot import CopilotClient, Tool, ToolInvocation, ToolResult, ToolSet
 from copilot.session import PermissionHandler
@@ -16,29 +15,15 @@ from copilot.session_events import (
     ToolExecutionStartData,
 )
 
-from agent.base_agent import BaseAgent, create_user_message_with_game_state
-from agent.prompts import SYSTEM_PROMPT
+from pokemon_agent.agents.base import BaseAgent
+from pokemon_agent.agents.copilot_config import CopilotAgentConfig
+from pokemon_agent.agents.prompts import SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
 # Our memory tools reuse these Copilot built-in names; the SDK requires an explicit override to register them.
 COPILOT_BUILTIN_TOOL_NAMES = {"view", "create", "edit"}
 
-@dataclass(frozen=True)
-class CopilotAgentConfig:
-    """Settings for CopilotAgent, which uses GitHub Copilot-hosted models with your Copilot login.
-
-    model: GitHub Copilot model ID (the model must support image input); None uses Copilot's default model. Usually set
-        per run with `main.py --model`.
-    reasoning_effort: "low", "medium", "high", or "xhigh"; None uses the model's default.
-    turn_timeout_seconds: Maximum time for one step (model calls plus tool execution).
-    copilot_home: Directory for Copilot session state and logs.
-    """
-
-    model: str | None = None
-    reasoning_effort: str | None = None
-    turn_timeout_seconds: float = 600.0
-    copilot_home: str = ".copilot-sdk"
 
 
 def _quiet_unknown_event_errors(loop: asyncio.AbstractEventLoop, context: dict):
@@ -97,13 +82,7 @@ class CopilotAgent(BaseAgent):
     def _step_message(self, prefix_content: str) -> tuple[str, list[dict]]:
         """Build the step prompt text and screenshot attachment from the current game state."""
         observation = self.observe()
-        message = create_user_message_with_game_state(
-            prefix_content=prefix_content,
-            memory_info=observation.memory_info,
-            collision_map=observation.collision_map,
-            memory_listing=self.memory_listing(),
-        )
-        prompt = "\n".join(part["text"] for part in message["content"])
+        prompt = "\n".join([prefix_content, *self.game_state_sections(observation, self.memory_listing())])
         attachments = [
             {"type": "blob", "data": observation.screenshot_b64, "mimeType": "image/png", "displayName": "screenshot"}
         ]

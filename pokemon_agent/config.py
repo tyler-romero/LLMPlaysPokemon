@@ -1,8 +1,8 @@
 # Configuration for the application
-from agent.copilot_agent import CopilotAgentConfig
-from agent.llm_client import LLMConfig
+from pokemon_agent.agents.copilot_config import CopilotAgentConfig
+from pokemon_agent.llm.client import LLMConfig
 
-# LLM used by the "simple" agent. See LLMConfig in agent/llm_client.py for all options, including
+# LLM used by the "simple" agent. See LLMConfig in pokemon_agent/llm/client.py for all options, including
 # provider ("gemini", "openai", "vllm") and api ("chat_completions", "responses").
 SIMPLE_AGENT_LLM = LLMConfig(
     provider="gemini",
@@ -17,6 +17,6 @@ SIMPLE_AGENT_LLM = LLMConfig(
 # LLMConfig(provider="vllm", model="Qwen/Qwen2.5-VL-7B-Instruct")
 
 # Settings for the "copilot" agent (GitHub Copilot SDK with a Copilot-hosted model and your Copilot login).
-# See CopilotAgentConfig in agent/copilot_agent.py for all options. The model defaults to Copilot's default model;
-# choose one per run with `main.py --model <copilot-model-id>`.
+# See CopilotAgentConfig in pokemon_agent/agents/copilot_config.py for all options. The model defaults to Copilot's
+# default model; choose one per run with `--model <copilot-model-id>`.
 COPILOT_AGENT = CopilotAgentConfig()

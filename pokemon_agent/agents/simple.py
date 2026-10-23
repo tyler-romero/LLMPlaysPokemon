@@ -1,20 +1,23 @@
 import copy
+import json
 import logging
-import os
 
 import openai
 from openai import NotGiven
 from openai.types.chat import (
     ChatCompletionMessageParam,
+    ChatCompletionMessageToolCall,
     ChatCompletionSystemMessageParam,
+    ChatCompletionToolMessageParam,
     ChatCompletionToolParam,
     ChatCompletionUserMessageParam,
 )
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from agent.base_agent import BaseAgent, GameObservation, create_user_message_with_game_state
-from agent.llm_client import LLMConfig, LLMResponse, create_llm_adapter
-from agent.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
+from pokemon_agent.agents.base import BaseAgent
+from pokemon_agent.agents.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
+from pokemon_agent.game.observation import GameObservation
+from pokemon_agent.llm.client import LLMConfig, LLMResponse, create_llm_adapter
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -55,14 +58,23 @@ class SimpleAgent(BaseAgent):
         memory_listing: str | None = None,
         suffix_content: str | None = None,
     ) -> ChatCompletionUserMessageParam:
-        return create_user_message_with_game_state(
-            prefix_content=prefix_content,
-            screenshot_b64=observation.screenshot_b64,
-            memory_info=observation.memory_info,
-            collision_map=observation.collision_map,
-            memory_listing=memory_listing,
-            suffix_content=suffix_content,
+        """Build a Chat Completions user message with the screenshot and game state."""
+        texts = [prefix_content] if prefix_content else []
+        content_parts = [{"type": "text", "text": text} for text in texts]
+        content_parts.append({"type": "text", "text": "Here is a screenshot of the screen:\n"})
+        content_parts.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{observation.screenshot_b64}"}}
         )
+        for section in BaseAgent.game_state_sections(observation, memory_listing):
+            content_parts.append({"type": "text", "text": section})
+        if suffix_content:
+            content_parts.append({"type": "text", "text": suffix_content})
+        return {"role": "user", "content": content_parts}
+
+    def _execute_tool_call(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
+        """Execute an OpenAI-format tool call and return the tool result message."""
+        result = self.tool_factory.execute_tool(tool_call.function.name, json.loads(tool_call.function.arguments))
+        return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
 
     def _system_message(self) -> ChatCompletionSystemMessageParam:
         return {"role": "system", "content": self.system_prompt}
@@ -114,7 +126,7 @@ class SimpleAgent(BaseAgent):
                 tool_calls = response.tool_calls
                 for tool_call in tool_calls:
                     logger.info(f"[Tool] Using tool {tool_call.function.name} with args {tool_call.function.arguments}")
-                    tool_call_result = self.tool_factory.process_tool_call(tool_call)
+                    tool_call_result = self._execute_tool_call(tool_call)
                     self.message_history.append(tool_call_result)  # type: ignore
                     self._save_web_screenshot()
                 if not tool_calls:
@@ -187,22 +199,3 @@ class SimpleAgent(BaseAgent):
 
         logger.info("[Agent] Message history condensed into summary.")
         self._save_web_screenshot()
-
-
-if __name__ == "__main__":
-    from config import SIMPLE_AGENT_LLM
-
-    # Get the ROM path relative to this file
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    rom_path = os.path.join(os.path.dirname(current_dir), "pokemon.gb")
-
-    # Create and run agent
-    agent = SimpleAgent(rom_path, llm_config=SIMPLE_AGENT_LLM)
-
-    try:
-        steps_completed = agent.run(num_steps=10)
-        logger.info(f"Agent completed {steps_completed} steps")
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, stopping")
-    finally:
-        agent.stop()
