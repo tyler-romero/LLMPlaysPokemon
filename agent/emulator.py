@@ -63,12 +63,15 @@ class Emulator:
         if player_name.strip() in ["", "NINTEN", "Not yet set"]:
             raise ValueError("Loaded state appears to be at the beginning of the game or title screen")
 
-    def save_state(self, state_dir="saved_games"):
+    def save_state(self, state_dir="saved_games") -> list[str]:
         """
         Save the current emulator state to a pickled file.
 
         Args:
             state_dir: Directory path where state files will be saved
+
+        Returns:
+            Paths of the state files written
         """
         os.makedirs(state_dir, exist_ok=True)
 
@@ -86,6 +89,7 @@ class Emulator:
             self.pyboy.save_state(f)
 
         logger.info(f"Saved game state to {timestamped_path} and {last_session_path}")
+        return [last_session_path, timestamped_path]
 
     def press_buttons(self, buttons, wait=True) -> str:
         """Press a sequence of buttons on the Game Boy.
@@ -100,15 +104,6 @@ class Emulator:
         results = []
 
         for button in buttons:
-            if button == "↑":
-                button = "up"
-            elif button == "↓":
-                button = "down"
-            elif button == "←":
-                button = "left"
-            elif button == "→":
-                button = "right"
-
             if button not in [
                 "a",
                 "b",
@@ -297,22 +292,22 @@ class Emulator:
         if player_coords in warp_coords:
             if player_coords[0] and player_coords[1]:  # They're both not 9
                 # just yield all moves...
-                return ["↑", "↓", "←", "→"]
+                return ["up", "down", "left", "right"]
             if not player_coords[0]:
-                valid_moves.append("←")
+                valid_moves.append("left")
             if not player_coords[
                 1
             ]:  # there is a literal corner case where both are 0, but that never happens in Pokemon Red.
-                valid_moves.append("↑")
+                valid_moves.append("up")
         # Check each direction
         if terrain[3][4] != 0 and (4, 3) not in sprites:  # Up
-            valid_moves.append("↑")
+            valid_moves.append("up")
         if terrain[5][4] != 0 and (4, 5) not in sprites:  # Down
-            valid_moves.append("↓")
+            valid_moves.append("down")
         if terrain[4][3] != 0 and (3, 4) not in sprites:  # Left
-            valid_moves.append("←")
+            valid_moves.append("left")
         if terrain[4][5] != 0 and (5, 4) not in sprites:  # Right
-            valid_moves.append("→")
+            valid_moves.append("right")
 
         return valid_moves
 

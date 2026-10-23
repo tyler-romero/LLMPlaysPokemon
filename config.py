@@ -1,7 +1,22 @@
 # Configuration for the application
-# MODEL_NAME = "Qwen/Qwen2.5-VL-7B-Instruct"
-# MODEL_NAME = "gpt-4.1-nano"
-MODEL_NAME = "gemini-2.0-flash"
+from agent.copilot_agent import CopilotAgentConfig
+from agent.llm_client import LLMConfig
 
-TEMPERATURE = 1.0
-MAX_TOKENS = 4096
+# LLM used by the "simple" agent. See LLMConfig in agent/llm_client.py for all options, including
+# provider ("gemini", "openai", "vllm") and api ("chat_completions", "responses").
+SIMPLE_AGENT_LLM = LLMConfig(
+    provider="gemini",
+    model="gemini-2.0-flash",
+    api="chat_completions",
+    temperature=1.0,
+    max_tokens=4096,
+)
+
+# Other examples:
+# LLMConfig(provider="openai", model="gpt-4.1-nano", api="responses")
+# LLMConfig(provider="vllm", model="Qwen/Qwen2.5-VL-7B-Instruct")
+
+# Settings for the "copilot" agent (GitHub Copilot SDK with a Copilot-hosted model and your Copilot login).
+# See CopilotAgentConfig in agent/copilot_agent.py for all options. The model defaults to Copilot's default model;
+# choose one per run with `main.py --model <copilot-model-id>`.
+COPILOT_AGENT = CopilotAgentConfig()

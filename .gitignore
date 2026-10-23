@@ -54,8 +54,13 @@ pokemon.gb
 pokemon.gb.ram
 web_output/
 saved_games/
-agent_knowledge_base.txt
-agent_knowledge_base.txt.old
 history.txt
 collision_map.txt
 screenshot_test.png
+
+# Copilot SDK session state
+.copilot-sdk/
+
+# Agent memory (current run and previous run)
+memories/
+memories.old/

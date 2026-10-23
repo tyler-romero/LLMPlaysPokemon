@@ -1,9 +1,13 @@
 import argparse
+import dataclasses
 import logging
 import os
 import sys
 
+from agent.base_agent import BaseAgent
+from agent.copilot_agent import CopilotAgent
 from agent.simple_agent import SimpleAgent
+from config import COPILOT_AGENT, SIMPLE_AGENT_LLM
 
 # Set up logging
 logging.basicConfig(
@@ -15,8 +19,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def build_simple_agent(args: argparse.Namespace, **common) -> BaseAgent:
+    llm_config = dataclasses.replace(SIMPLE_AGENT_LLM, model=args.model) if args.model else SIMPLE_AGENT_LLM
+    return SimpleAgent(llm_config=llm_config, max_history=args.max_history, **common)
+
+
+def build_copilot_agent(args: argparse.Namespace, **common) -> BaseAgent:
+    config = dataclasses.replace(COPILOT_AGENT, model=args.model) if args.model else COPILOT_AGENT
+    return CopilotAgent(config=config, **common)
+
+
+# Agent name -> builder taking parsed CLI args and the shared BaseAgent options.
+AGENT_BUILDERS = {
+    "simple": build_simple_agent,
+    "copilot": build_copilot_agent,
+}
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Claude Plays Pokemon - Starter Version")
+    parser = argparse.ArgumentParser(description="LLM Plays Pokemon")
+    parser.add_argument("--agent", choices=sorted(AGENT_BUILDERS), default="simple", help="Agent to run")
+    parser.add_argument(
+        "--model", type=str, default=None, help="Model to use, overriding the agent's model in config.py"
+    )
     parser.add_argument("--rom", type=str, default="pokemon.gb", help="Path to the Pokemon ROM file")
     parser.add_argument("--steps", type=int, default=250, help="Number of agent steps to run")
     parser.add_argument("--display", action="store_true", help="Run with display (not headless)")
@@ -29,7 +54,7 @@ def main():
         "--max-history",
         type=int,
         default=30,
-        help="Maximum number of messages in history before summarization",
+        help="Maximum number of messages in history before summarization (simple agent)",
     )
     parser.add_argument("--save-every", type=int, default=100, help="Number of steps between save_state() calls")
     parser.add_argument("--load-state", type=str, default=None, help="Path to a saved state to load")
@@ -69,14 +94,14 @@ def main():
             sys.exit(1)
 
     # Create and run agent
-    agent = SimpleAgent(
+    agent = AGENT_BUILDERS[args.agent](
+        args,
         rom_path=rom_path,
         headless=not args.display,
         sound=args.sound if args.display else False,
-        max_history=args.max_history,
         save_every=args.save_every,
         load_state=args.load_state,
-        web_output_dir=web_output_dir,  # Pass web output directory to agent
+        web_output_dir=web_output_dir,
     )
 
     try:

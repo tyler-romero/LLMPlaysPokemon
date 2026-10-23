@@ -12,6 +12,7 @@ dependencies = [
     "openai>=1.77.0",
     "tenacity>=9.1.2",
     "chromadb>=1.0.8",
+    "github-copilot-sdk>=1.0.26",
 ]
 
 [project.optional-dependencies]
