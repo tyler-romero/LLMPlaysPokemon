@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from pathlib import Path
 
 from copilot import CopilotClient, Tool, ToolInvocation, ToolResult, ToolSet
 from copilot.session import PermissionHandler
@@ -19,8 +20,12 @@ from copilot.session_events import (
 from pokemon_agent.agents.base import BaseAgent
 from pokemon_agent.agents.copilot_config import CopilotAgentConfig
 from pokemon_agent.agents.prompts import system_prompt
+from pokemon_agent.runs import copy_tree
 
 logger = logging.getLogger(__name__)
+
+# Runtime lock files inside a session folder; never copied into or out of checkpoints.
+SESSION_RUNTIME_FILES = ("*.lock", "*.hold")
 
 # Our memory tools reuse these Copilot built-in names; the SDK requires an explicit override to register them.
 COPILOT_BUILTIN_TOOL_NAMES = {"view", "create", "edit"}
@@ -55,7 +60,12 @@ class CopilotAgent(BaseAgent):
         super().__init__(rom_path, **kwargs)
         self.config = config
         self.system_prompt = system_prompt(config.model)
-        self.steps_completed = 0
+        # In a durable run, the SDK's session lives inside the run folder under a stable ID so it can be resumed.
+        self.copilot_home = self.run_store.root / "copilot-sdk" if self.run_store else Path(config.copilot_home)
+        self.session_id = self.run_store.run_id if self.run_store else None
+        self.resume_session = False
+        if self.resume_checkpoint:
+            self.restore_agent_state(self.resume_checkpoint / "agent")
         logger.info(f"Using Copilot SDK with GitHub Copilot model {config.model or 'default'!r}")
         self.emit("run", agent="copilot", model=config.model or "Copilot default", provider="GitHub Copilot")
 
@@ -115,20 +125,44 @@ class CopilotAgent(BaseAgent):
             case SessionErrorData(message=message):
                 logger.error(f"[Copilot] {message}")
 
+    # ----- durable conversation -----------------------------------------------------------------------------------
+
+    def _session_dir(self) -> Path:
+        return self.copilot_home / "session-state" / str(self.session_id)
+
+    def write_agent_state(self, directory: Path):
+        if self.session_id and self._session_dir().is_dir():
+            copy_tree(self._session_dir(), directory / "copilot-session", ignore_patterns=SESSION_RUNTIME_FILES)
+
+    def restore_agent_state(self, directory: Path):
+        snapshot = directory / "copilot-session"
+        if not snapshot.is_dir():
+            logger.warning("Checkpoint has no Copilot session; starting a new conversation")
+            return
+        copy_tree(snapshot, self._session_dir(), ignore_patterns=SESSION_RUNTIME_FILES)
+        self.resume_session = True
+        logger.info(f"Restored Copilot session {self.session_id}")
+
     async def _run_async(self, num_steps: int):
         asyncio.get_running_loop().set_exception_handler(_quiet_unknown_event_errors)
 
-        async with CopilotClient(mode="empty", base_directory=self.config.copilot_home) as client:
-            async with await client.create_session(
-                on_permission_request=PermissionHandler.approve_all,
-                model=self.config.model,
-                system_message={"mode": "replace", "content": self.system_prompt},
-                available_tools=ToolSet().add_custom("*"),
-                tools=self._sdk_tools(),
-                reasoning_effort=self.config.reasoning_effort,
-            ) as session:
-                session.on(self._log_event)
+        session_options = dict(
+            on_permission_request=PermissionHandler.approve_all,
+            model=self.config.model,
+            system_message={"mode": "replace", "content": self.system_prompt},
+            available_tools=ToolSet().add_custom("*"),
+            tools=self._sdk_tools(),
+            reasoning_effort=self.config.reasoning_effort,
+        )
+        async with CopilotClient(mode="empty", base_directory=str(self.copilot_home)) as client:
+            if self.resume_session:
+                open_session = client.resume_session(self.session_id, **session_options)
+                prefix_content = "Resumed from a saved checkpoint. Time to take your next action!"
+            else:
+                open_session = client.create_session(session_id=self.session_id, **session_options)
                 prefix_content = "You may now begin playing.\n"
+            async with await open_session as session:
+                session.on(self._log_event)
                 while self.running and self.steps_completed < num_steps:
                     prompt, attachments = self._step_message(prefix_content)
                     await session.send_and_wait(
@@ -144,8 +178,8 @@ class CopilotAgent(BaseAgent):
         Args:
             num_steps: Number of steps to run for
         """
-        logger.info(f"Starting agent loop for {num_steps} steps")
-        self.emit("run_start", steps=num_steps)
+        logger.info(f"Running until step {num_steps} (starting at {self.steps_completed})")
+        self.emit("run_start", steps=num_steps, resumed_from=self.steps_completed or None)
         try:
             asyncio.run(self._run_async(num_steps))
         except KeyboardInterrupt:
@@ -153,7 +187,8 @@ class CopilotAgent(BaseAgent):
             self.running = False
         except Exception as e:
             logger.error("Error in agent loop.", exc_info=True)
-            raise e  # skips saving state, handled in main.py
+            self.save_state_after_failure()
+            raise e
 
         self.save_state()
         self.emit("run_end", steps=self.steps_completed)

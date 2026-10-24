@@ -6,10 +6,13 @@ the agent: slow subscribers drop media and, at worst, are disconnected.
 
 import base64
 import io
+import json
+import os
 import queue
 import threading
 import time
 from collections import deque
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -29,7 +32,13 @@ class Subscriber:
 
 
 class ObserverHub:
-    def __init__(self):
+    """Collects run events for the observer page.
+
+    With `event_log`, events (except media) are appended to a JSONL file so a resumed run keeps its history;
+    `resume_seq` replays the file up to that event and drops anything later (events after the checkpoint).
+    """
+
+    def __init__(self, event_log: Path | None = None, resume_seq: int | None = None):
         self._lock = threading.Lock()
         self._subscribers: list[Subscriber] = []
         self._seq = 0
@@ -46,9 +55,34 @@ class ObserverHub:
         self._frame_dirty = False
         self._last_frame_b64: str | None = None
         self._audio_chunks: list[np.ndarray] = []
+        self._event_log = None
+        if event_log:
+            if resume_seq is not None and event_log.exists():
+                self._replay(event_log, resume_seq)
+            self._event_log = open(event_log, "a", buffering=1)
+
         self._pump_stop = threading.Event()
         self._pump = threading.Thread(target=self._pump_media, name="observer-media", daemon=True)
         self._pump.start()
+
+    @property
+    def seq(self) -> int:
+        return self._seq
+
+    def _replay(self, path: Path, max_seq: int):
+        kept = []
+        for line in path.read_text().splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # a line cut off by a crash
+            if event.get("seq", 0) <= max_seq:
+                kept.append(event)
+                self._apply(event)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("".join(json.dumps(e, default=str) + "\n" for e in kept))
+        os.replace(tmp, path)
+        self._seq = max((e["seq"] for e in kept), default=0)
 
     # ----- publishing -----------------------------------------------------------------------------------------------
 
@@ -57,32 +91,43 @@ class ObserverHub:
         with self._lock:
             self._seq += 1
             event = {"seq": self._seq, "t": time.time(), "kind": kind, **data}
-            if kind == "run":
-                self.run = {**self.run, **data}
-            elif kind == "run_start":
-                self.run = {**self.run, "started_at": event["t"], "steps": data["steps"], "ended_at": None}
-            elif kind == "run_end":
-                self.run = {**self.run, "ended_at": event["t"]}
-            elif kind == "usage":
-                self.run = {**self.run, "input_tokens": data["input"]}
-            elif kind == "state":
-                self.state = data["state"]
-            elif kind == "memory":
-                self.memory_listing = data["listing"]
-            elif kind == "input":
-                self.input_count += 1
-                self.inputs.append(event)
-            elif kind == "step":
-                self.step = data["step"]
-            if kind in LOGGED_KINDS:
-                self.log.append(event)
+            self._apply(event)
+            if self._event_log:
+                self._event_log.write(json.dumps(event, default=str) + "\n")
             self._broadcast(event)
+
+    def _apply(self, event: dict):
+        """Fold an event into the hub's current state and history."""
+        kind = event["kind"]
+        data = {k: v for k, v in event.items() if k not in ("seq", "t", "kind")}
+        if kind == "run":
+            self.run = {**self.run, **data}
+        elif kind == "run_start":
+            # A resumed run keeps its original start time.
+            started = self.run.get("started_at") or event["t"]
+            self.run = {**self.run, "started_at": started, "steps": data["steps"], "ended_at": None}
+        elif kind == "run_end":
+            self.run = {**self.run, "ended_at": event["t"]}
+        elif kind == "usage":
+            self.run = {**self.run, "input_tokens": data["input"]}
+        elif kind == "state":
+            self.state = data["state"]
+        elif kind == "memory":
+            self.memory_listing = data["listing"]
+        elif kind == "input":
+            self.input_count += 1
+            self.inputs.append(event)
+        elif kind == "step":
+            self.step = data["step"]
+        if kind in LOGGED_KINDS:
+            self.log.append(event)
 
     def on_frame(self, screen: np.ndarray, sound: np.ndarray | None):
         """Called by the emulator after every frame; must stay cheap."""
         with self._lock:
             self._frame = screen.copy()
             self._frame_dirty = True
+            self._last_frame_b64 = None
             if sound is not None and len(sound):
                 self._audio_chunks.append(sound[::AUDIO_DOWNSAMPLE].copy())
 
@@ -106,7 +151,7 @@ class ObserverHub:
                 "inputs": list(self.inputs),
                 "inputCount": self.input_count,
                 "step": self.step,
-                "frame": self._last_frame_b64,
+                "frame": self._last_frame_b64 or _encode_frame(self._frame),
                 "audioSampleRate": self.audio_sample_rate,
             }
             self._subscribers.append(subscriber)
@@ -119,6 +164,10 @@ class ObserverHub:
 
     def close(self):
         self._pump_stop.set()
+        with self._lock:
+            if self._event_log:
+                self._event_log.close()
+                self._event_log = None
 
     def _broadcast(self, event: dict, droppable: bool = False):
         for subscriber in list(self._subscribers):
@@ -141,21 +190,26 @@ class ObserverHub:
                 audio = np.concatenate(self._audio_chunks) if self._audio_chunks else None
                 self._audio_chunks = []
                 has_subscribers = bool(self._subscribers)
-            if frame is None and audio is None:
+            if not has_subscribers or (frame is None and audio is None):
                 continue
             event: dict[str, Any] = {"kind": "media", "t": time.time()}
             if frame is not None:
-                buffer = io.BytesIO()
-                Image.fromarray(frame[:, :, :3]).save(buffer, format="PNG", optimize=False, compress_level=1)
-                frame_b64 = base64.b64encode(buffer.getvalue()).decode()
+                frame_b64 = _encode_frame(frame)
                 event["frame"] = frame_b64
                 with self._lock:
                     self._last_frame_b64 = frame_b64
-            if audio is not None and has_subscribers:
+            if audio is not None:
                 event["audio"] = base64.b64encode(audio.astype(np.int8).tobytes()).decode()
-            if has_subscribers:
-                with self._lock:
-                    self._broadcast(event, droppable=True)
+            with self._lock:
+                self._broadcast(event, droppable=True)
 
 
-LOGGED_KINDS = {"thought", "tool", "tool_result", "summary", "notice", "step", "run_start", "run_end"}
+def _encode_frame(frame: np.ndarray | None) -> str | None:
+    if frame is None:
+        return None
+    buffer = io.BytesIO()
+    Image.fromarray(frame[:, :, :3]).save(buffer, format="PNG", optimize=False, compress_level=1)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
+LOGGED_KINDS = {"thought", "tool", "tool_result", "summary", "notice", "step", "run_start", "run_end", "checkpoint"}

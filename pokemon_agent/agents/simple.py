@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+from pathlib import Path
 
 import openai
 from openai import NotGiven
@@ -47,10 +48,39 @@ class SimpleAgent(BaseAgent):
         )
         self.emit("run", agent="simple", model=llm_config.model, provider=llm_config.provider, api=llm_config.api)
 
-        initial_message = self._game_state_message(
-            self.observe(), prefix_content="You may now begin playing.\n", memory_listing=self.memory_listing()
+        self._history_mark = 0
+        self._failed = False
+        if self.resume_checkpoint:
+            self.restore_agent_state(self.resume_checkpoint / "agent")
+        else:
+            initial_message = self._game_state_message(
+                self.observe(), prefix_content="You may now begin playing.\n", memory_listing=self.memory_listing()
+            )
+            self.message_history = [initial_message]
+
+    # ----- durable conversation -----------------------------------------------------------------------------------
+
+    def write_agent_state(self, directory: Path):
+        # After a crash mid-step, keep only whole steps; the next observation shows whatever the partial step did.
+        history = self.message_history[: self._history_mark] if self._failed else self.message_history
+        items = [_jsonable(item) for item in history]
+        # Screenshots dominate the size; keep only the latest one.
+        items = [_without_images(item) for item in items[:-1]] + items[-1:]
+        (directory / "conversation.json").write_text(json.dumps({"message_history": items}, default=str))
+
+    def restore_agent_state(self, directory: Path):
+        self.message_history = json.loads((directory / "conversation.json").read_text())["message_history"]
+        resumed = self._game_state_message(
+            self.observe(),
+            prefix_content="Resumed from a saved checkpoint. Time to take your next action!",
+            memory_listing=self.memory_listing(),
         )
-        self.message_history = [initial_message]
+        # Replace the checkpoint's last observation with a fresh one (or add one after a partial step).
+        if self.message_history and self.message_history[-1].get("role") == "user":
+            self.message_history[-1] = resumed
+        else:
+            self.message_history.append(resumed)
+        logger.info(f"Restored {len(self.message_history)} conversation messages")
 
     @staticmethod
     def _game_state_message(
@@ -74,7 +104,12 @@ class SimpleAgent(BaseAgent):
 
     def _execute_tool_call(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
         """Execute an OpenAI-format tool call and return the tool result message."""
-        result = self.run_tool(tool_call.function.name, json.loads(tool_call.function.arguments))
+        try:
+            arguments = json.loads(tool_call.function.arguments or "{}")
+        except json.JSONDecodeError as e:
+            result = f"Error: tool arguments are not valid JSON ({e}); no action was taken."
+            return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+        result = self.run_tool(tool_call.function.name, arguments)
         return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
 
     def _emit_usage(self, usage):
@@ -110,10 +145,11 @@ class SimpleAgent(BaseAgent):
         Args:
             num_steps: Number of steps to run for
         """
-        logger.info(f"Starting agent loop for {num_steps} steps")
-        self.emit("run_start", steps=num_steps)
-        steps_completed = 0
+        logger.info(f"Running until step {num_steps} (starting at {self.steps_completed})")
+        self.emit("run_start", steps=num_steps, resumed_from=self.steps_completed or None)
+        steps_completed = self.steps_completed
         while self.running and steps_completed < num_steps:
+            self._history_mark = len(self.message_history)
             try:
                 messages: list[ChatCompletionMessageParam] = [self._system_message()] + copy.deepcopy(
                     self.message_history
@@ -160,9 +196,12 @@ class SimpleAgent(BaseAgent):
             except KeyboardInterrupt:
                 logger.info("Received keyboard interrupt, stopping")
                 self.running = False
+                self._failed = True  # the step was cut short; checkpoint only whole steps
             except Exception as e:
                 logger.error("Error in agent loop.", exc_info=True)
-                raise e  # skips saving state, handled in main.py
+                self._failed = True
+                self.save_state_after_failure()
+                raise e
 
         self.save_state()
         self.emit("run_end", steps=steps_completed)
@@ -211,3 +250,17 @@ class SimpleAgent(BaseAgent):
 
         logger.info("[Agent] Message history condensed into summary.")
         self._save_web_screenshot()
+
+
+def _jsonable(item):
+    return item.model_dump(mode="json", exclude_none=True) if hasattr(item, "model_dump") else item
+
+
+def _without_images(item):
+    if not isinstance(item, dict) or not isinstance(item.get("content"), list):
+        return item
+    parts = [
+        {"type": "text", "text": "[earlier screenshot omitted]"} if part.get("type") == "image_url" else part
+        for part in item["content"]
+    ]
+    return {**item, "content": parts}

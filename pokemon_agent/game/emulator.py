@@ -55,7 +55,12 @@ class Emulator:
         time.sleep(0.2 + random.random())
         return Image.fromarray(self.pyboy.screen.ndarray)
 
-    def load_state(self, state_filename):
+    def save_state_to(self, path):
+        """Save the emulator state to one file."""
+        with open(path, "wb") as f:
+            self.pyboy.save_state(f)
+
+    def load_state(self, state_filename, validate=True):
         """
         Load a state from a pickled file into the emulator.
         The pickled file should contain a dictionary with a 'pyboy_state' key.
@@ -65,6 +70,8 @@ class Emulator:
         """
         with open(state_filename, "rb") as f:
             self.pyboy.load_state(f)
+        if not validate:
+            return
 
         memory_reader = PokemonRedReader(self.pyboy.memory)
         player_name = memory_reader.read_player_name()

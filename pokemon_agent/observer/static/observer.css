@@ -449,6 +449,7 @@ ol, ul { list-style: none; }
 .summary__text { padding-top: calc(var(--tile) / 2); max-width: 80ch; font-size: 14px; line-height: 1.45; white-space: pre-wrap; }
 
 .notice { color: var(--ink-2); text-align: center; padding: var(--tile) 0; }
+.entry--checkpoint { font-size: 12px; color: var(--ink-2); text-align: right; padding: 0 var(--tile); }
 
 .latest {
   position: absolute;

@@ -12,9 +12,9 @@ logger = logging.getLogger(__name__)
 class MemoryFileTool(Tool):
     """Base for the file tools over /memories; subclasses set `name`."""
 
-    def __init__(self, emulator: Emulator):
+    def __init__(self, emulator: Emulator, memory: MemoryStore | None = None):
         super().__init__(emulator)
-        self.store = MemoryStore()
+        self.store = memory or MemoryStore()
         self.description = MEMORY_TOOL_SPECS[self.name]["description"]
         self.parameters = MEMORY_TOOL_SPECS[self.name]["parameters"]
 

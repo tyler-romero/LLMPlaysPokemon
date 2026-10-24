@@ -80,11 +80,39 @@ system monospace.
 
 Both agents get memory tools shaped like GitHub Copilot's built-in file tools: `view`, `create`, and `edit` use the
 same names and parameters as the built-ins (with memory-focused descriptions), plus `delete` and `rename`. They operate
-on a virtual `/memories` directory stored in `memories/`, and every path is checked so the model can't read or write
+on a virtual `/memories` directory stored in the run folder's `memories/`, and every path is checked so the model can't read or write
 outside it. Each step includes a listing of the memory files (not their contents); the model reads what it needs.
 
-A new run starts with empty memory (the previous run's is kept in `memories.old/`). Each saved state gets a snapshot
-of the memory directory next to it (`<state file>.memories/`), and `--load-state` restores it.
+Each run keeps its memory in its own run folder (see [Durable runs](#durable-runs)) and starts empty unless it resumes
+a checkpoint or loads a state with a memory snapshot.
+
+## Durable runs
+
+Every run gets a folder under `runs/` (change it with `--runs-dir`), and is checkpointed every `--save-every` steps and
+when it ends or crashes. A checkpoint holds everything needed to continue: the game state, the `/memories` files, and
+the conversation (the `simple` agent's message history, or the Copilot SDK session). Resume a run with:
+
+```
+uv run pokemon-agent --resume runs/<run id> --steps 1000
+```
+
+`--steps` is the total step count for the run, so the example continues until step 1000. The agent and model come from
+the run, and passing a different `--agent` or `--model` is an error. The observer replays the run's earlier history.
+
+```
+runs/<YYYYmmdd-HHMMSS>-<agent>-<model>/
+  run.json          # agent, model, and creation time
+  events.jsonl      # observer event log (replayed on resume)
+  memories/         # live /memories files
+  copilot-sdk/      # Copilot SDK home (copilot agent only)
+  checkpoints/<step>/
+    game.state  memories/  agent/  checkpoint.json
+  latest            # name of the newest complete checkpoint
+```
+
+Checkpoints are written atomically, so an interrupted save never replaces the last good one. The last 5 checkpoints and
+every 100th step are kept. `--load-state` starts a new run from a PyBoy state file (restoring the memory snapshot next
+to it, `<state file>.memories/`, if there is one).
 
 ## Usage
 
@@ -104,8 +132,10 @@ Optional arguments:
 - `--observe`: Serve the live observer page while the agent runs (see [Observer](#observer))
 - `--observe-port`: Port for the observer page (default: 8765)
 - `--max-history`: Maximum number of messages in history before summarization, for the `simple` agent (default: 30)
-- `--save-every`: Number of steps between save states (default: 100)
-- `--load-state`: Path to a saved state to load
+- `--save-every`: Number of steps between checkpoints (default: 10)
+- `--load-state`: Path to a saved state to start a new run from
+- `--resume`: Run folder to resume from its latest checkpoint (see [Durable runs](#durable-runs))
+- `--runs-dir`: Directory for new run folders (default: `runs`)
 - `--web-output`: Save latest screenshots to `./web_output/` for web viewing
 
 Example:

@@ -2,8 +2,10 @@ import logging
 
 from pokemon_agent.tools.base import Tool
 from pokemon_agent.tools.game_tools import NavigateToScreenCoordinatesTool, OnScreenKeyboardTool, PressButtonsTool
+from pokemon_agent.memory.store import MemoryStore
 from pokemon_agent.tools.memory_tools import (
     MemoryCreateTool,
+    MemoryFileTool,
     MemoryDeleteTool,
     MemoryEditTool,
     MemoryRenameTool,
@@ -41,14 +43,19 @@ DEFAULT_TOOL_NAMES = [
 class ToolFactory:
     """Factory for creating tool instances."""
 
-    def __init__(self, emulator, tool_names: list[str] | None = None):
-        """Initialize the selected tools (DEFAULT_TOOL_NAMES if None) with an emulator instance."""
+    def __init__(self, emulator, tool_names: list[str] | None = None, memory: MemoryStore | None = None):
+        """Initialize the selected tools (DEFAULT_TOOL_NAMES if None); memory tools use the given memory store."""
         self.emulator = emulator
         tool_names = DEFAULT_TOOL_NAMES if tool_names is None else tool_names
         unknown = set(tool_names) - TOOL_CLASSES.keys()
         if unknown:
             raise ValueError(f"Unknown tools: {sorted(unknown)}; available: {sorted(TOOL_CLASSES)}")
-        self.tools: dict[str, Tool] = {name: TOOL_CLASSES[name](emulator) for name in tool_names}
+        self.tools: dict[str, Tool] = {
+            name: TOOL_CLASSES[name](emulator, memory)
+            if issubclass(TOOL_CLASSES[name], MemoryFileTool)
+            else TOOL_CLASSES[name](emulator)
+            for name in tool_names
+        }
 
         logger.info("Available tools:")
         for tool in self.tools.values():
@@ -56,7 +63,10 @@ class ToolFactory:
 
     def execute_tool(self, tool_name: str, tool_input: dict) -> str:
         logger.info(f"Processing tool call: {tool_name}")
-        return self.tools[tool_name].execute(tool_input)
+        tool = self.tools.get(tool_name)
+        if tool is None:
+            return f"Error: unknown tool {tool_name!r}; available tools: {', '.join(self.tools)}"
+        return tool.execute(tool_input)
 
     def get_available_tools(self):
         return [tool.get_tool_definition() for tool in self.tools.values()]

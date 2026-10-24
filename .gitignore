@@ -67,3 +67,6 @@ memories.old/
 
 # Impeccable design-tool scratch (decision pages, review captures, caches)
 .impeccable/
+
+# Durable run folders (checkpoints, memory, conversation, event history)
+runs/

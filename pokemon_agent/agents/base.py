@@ -2,11 +2,13 @@ import json
 import logging
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 from pokemon_agent.game.emulator import Emulator
 from pokemon_agent.game.observation import GameObservation, get_screenshot_base64
-from pokemon_agent.memory.store import MEMORY_TOOL_SPECS, MemoryStore, reset_memory, snapshot_memory
+from pokemon_agent.memory.store import MEMORY_DIR, MEMORY_TOOL_SPECS, MemoryStore, reset_memory, snapshot_memory
 from pokemon_agent.observer.hub import ObserverHub
+from pokemon_agent.runs import RunStore, copy_tree
 from pokemon_agent.tools.factory import ToolFactory
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,8 @@ class BaseAgent(ABC):
         load_state=None,
         web_output_dir=None,
         observer: ObserverHub | None = None,
+        run: RunStore | None = None,
+        resume: bool = False,
     ):
         """Initialize the emulator and tools.
 
@@ -50,17 +54,33 @@ class BaseAgent(ABC):
             load_state: Path to a saved state file to load; its memory snapshot is restored if one exists
             web_output_dir: Directory to save latest.png for web viewing
             observer: Hub that streams the run to the observer page, if enabled
+            run: Run folder for durable checkpoints (game, memory, conversation); None saves to saved_games/
+            resume: Restore the run's latest checkpoint instead of starting fresh
         """
         self.observer = observer
+        self.run_store = run
         self._tool_calls = 0
+        self.steps_completed = 0
+        self.resume_checkpoint: Path | None = None
         self.emulator = Emulator(rom_path, headless, sound=sound)
         self.emulator.initialize()
 
         self.running = True
         self.save_every = save_every
         self.web_output_dir = web_output_dir
+        memory_root = str(run.memory_dir) if run else MEMORY_DIR
 
-        if load_state:
+        if resume:
+            if not run or not (checkpoint := run.latest_checkpoint()):
+                raise RuntimeError(f"Nothing to resume: {run.root if run else 'no run'} has no complete checkpoint")
+            info = json.loads((checkpoint / "checkpoint.json").read_text())
+            self.emulator.load_state(checkpoint / "game.state", validate=False)
+            reset_memory(restore_from=str(checkpoint / "memories"), root=memory_root)
+            self.steps_completed = info["step"]
+            self._tool_calls = info.get("tool_calls", 0)
+            self.resume_checkpoint = checkpoint
+            logger.info(f"Resumed {run.run_id} from step {self.steps_completed} ({checkpoint})")
+        elif load_state:
             logger.warning(f"Loading saved state from {load_state}")
             try:
                 self.emulator.load_state(load_state)
@@ -69,10 +89,11 @@ class BaseAgent(ABC):
                 logger.error(f"Failed to load state from {load_state}: {e}")
                 raise RuntimeError(f"Could not load saved state: {e}")
 
-        # Only replace memory once the saved state has loaded, so a failed start leaves existing memory untouched.
-        self._start_memory(load_state)
-        self.memory = MemoryStore()
-        self.tool_factory = ToolFactory(self.emulator, self.tool_names)
+        if not resume:
+            # Only replace memory once the saved state has loaded, so a failed start leaves existing memory untouched.
+            self._start_memory(load_state, memory_root)
+        self.memory = MemoryStore(memory_root)
+        self.tool_factory = ToolFactory(self.emulator, self.tool_names, memory=self.memory)
 
         if observer:
             self.emulator.frame_listener = observer.on_frame
@@ -100,19 +121,56 @@ class BaseAgent(ABC):
         return result
 
     @staticmethod
-    def _start_memory(load_state: str | None):
-        snapshot = f"{load_state}.memories" if load_state else None
-        if snapshot and not os.path.isdir(snapshot):
-            logger.warning(f"No memory snapshot at {snapshot}; starting with empty memory")
-            snapshot = None
-        reset_memory(restore_from=snapshot)
+    def _start_memory(load_state: str | None, memory_root: str):
+        snapshot = None
+        if load_state:
+            # A run checkpoint's game.state keeps its memory beside it; legacy saves use <state>.memories.
+            candidates = [Path(load_state).parent / "memories", Path(f"{load_state}.memories")]
+            snapshot = next((str(c) for c in candidates if c.is_dir()), None)
+            if not snapshot:
+                logger.warning(f"No memory snapshot for {load_state}; starting with empty memory")
+        reset_memory(restore_from=snapshot, root=memory_root)
         if snapshot:
             logger.info(f"Restored memory from {snapshot}")
 
     def save_state(self):
-        """Save the emulator state, with a snapshot of the memory directory next to each state file."""
-        for state_path in self.emulator.save_state():
-            snapshot_memory(f"{state_path}.memories")
+        """Checkpoint the run (game, memory, conversation, counters), or save to saved_games/ without a run."""
+        if not self.run_store:
+            for state_path in self.emulator.save_state():
+                snapshot_memory(f"{state_path}.memories")
+            return
+
+        def write(directory: Path) -> dict:
+            self.emulator.save_state_to(directory / "game.state")
+            copy_tree(self.run_store.memory_dir, directory / "memories")
+            (directory / "agent").mkdir()
+            self.write_agent_state(directory / "agent")
+            return {
+                "tool_calls": self._tool_calls,
+                "observer_seq": self.observer.seq if self.observer else None,
+            }
+
+        self.run_store.checkpoint(self.steps_completed, write)
+        self.emit("checkpoint", step=self.steps_completed)
+
+    def save_state_after_failure(self):
+        """Best-effort checkpoint after a crash, so a durable run can resume from the last completed step.
+
+        A clean checkpoint already taken at that step is kept rather than replaced by a mid-step one.
+        """
+        if self.run_store and (self.run_store.checkpoints / f"{self.steps_completed:06d}").is_dir():
+            logger.info(f"Keeping the existing checkpoint for step {self.steps_completed}")
+            return
+        try:
+            self.save_state()
+        except Exception:
+            logger.error("Could not save a checkpoint after the failure", exc_info=True)
+
+    def write_agent_state(self, directory: Path):
+        """Write the agent's conversation state into a checkpoint; subclasses override."""
+
+    def restore_agent_state(self, directory: Path):
+        """Restore the agent's conversation state from a checkpoint; subclasses override."""
 
     def memory_listing(self) -> str:
         listing = self.memory.listing()
@@ -173,10 +231,11 @@ class BaseAgent(ABC):
 
     def _on_step_complete(self, steps_completed: int, num_steps: int):
         """Log progress, refresh the web screenshot, and periodically save emulator state and memory."""
+        self.steps_completed = steps_completed
         logger.info(f"Completed step {steps_completed}/{num_steps}")
         self.emit("step", step=steps_completed, total=num_steps)
         self._save_web_screenshot()
-        if steps_completed % self.save_every == 0 and steps_completed > 0:
+        if self.save_every and steps_completed % self.save_every == 0 and steps_completed > 0:
             self.save_state()
 
     def stop(self):

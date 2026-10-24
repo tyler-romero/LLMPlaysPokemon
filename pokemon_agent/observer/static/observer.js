@@ -585,12 +585,14 @@ function handle(event, options = { live: true }) {
       break;
     case "run": renderRun(event); break;
     case "run_start":
-      run.startedAt = event.t;
+      run.startedAt ??= event.t;
       run.stepStartedAt = event.t;
       run.endedAt = null;
       run.steps = event.steps;
       renderStepCount();
-      addNotice(`${agentName()} STARTS A ${event.steps}-STEP RUN`);
+      addNotice(event.resumed_from
+        ? `RESUMED AT STEP ${event.resumed_from}`
+        : `${agentName()} STARTS A ${event.steps}-STEP RUN`);
       if (options.live) setActivity("THINKING", `${agentName()} is thinking…`);
       break;
     case "run_end":
@@ -615,6 +617,7 @@ function handle(event, options = { live: true }) {
       break;
     case "tool_result": addToolResult(event, options); break;
     case "summary": addSummary(event); break;
+    case "checkpoint": appendEntry(el("li", "entry entry--checkpoint", `Checkpoint saved at step ${event.step}`)); break;
     case "step": completeStep(event); break;
   }
 }
