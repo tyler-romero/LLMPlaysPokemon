@@ -7,94 +7,106 @@ from pokemon_agent.tools.base import Tool
 logger = logging.getLogger(__name__)
 
 
-class PressButtonTool(Tool):
-    """Tool for pressing a button on the Game Boy."""
+BUTTONS = ["a", "b", "up", "down", "left", "right", "start", "select"]
+MAX_BUTTONS_PER_CALL = 20
 
-    name = "press_button"
-    description = "Press a button on the Game Boy. In Pokemon Red, the arrow keys are used to move the player or cursor. The 'a' button is used to confirm decision, talk or read, advance dialogue, etc. The 'b' button is used to cancel decisions, close menus, etc. The 'start' button is used to open the overworld menu."
+
+class PressButtonsTool(Tool):
+    """Tool for pressing a sequence of buttons on the Game Boy."""
+
+    name = "press_buttons"
+    description = (
+        "Press one or more buttons on the Game Boy, in order. In Pokemon Red, the arrow keys are used to move the "
+        "player or cursor. The 'a' button is used to confirm decisions, talk or read, advance dialogue, etc. The 'b' "
+        "button is used to cancel decisions, close menus, etc. The 'start' button is used to open the overworld menu."
+    )
     ends_turn = True
     parameters = {
         "type": "object",
         "properties": {
-            "button": {
-                "type": "string",
-                "enum": [
-                    "a",
-                    "b",
-                    "up",
-                    "down",
-                    "left",
-                    "right",
-                    "start",
-                    "select",
-                ],
-                "description": "Button to press: 'a', 'b', 'up', 'down', 'left', 'right', 'start', or 'select'.",
+            "buttons": {
+                "type": "array",
+                "items": {"type": "string", "enum": BUTTONS},
+                "minItems": 1,
+                "maxItems": MAX_BUTTONS_PER_CALL,
+                "description": "Buttons to press in order, e.g. [\"a\"] or [\"up\", \"up\", \"a\"]. Valid buttons: "
+                "'a', 'b', 'up', 'down', 'left', 'right', 'start', 'select'.",
             },
             "wait": {
                 "type": "boolean",
-                "description": "Whether to let the game run for about 2 seconds after the press so walking, menu, and text animations finish before you see the next screenshot. Defaults to true. Set to false only for rapid presses whose intermediate result you don't need to see (the next screenshot may then show the game mid-animation).",
+                "description": "Whether to let the game run for about 2 seconds after each press so walking, menu, and "
+                "text animations finish before the next press and the next screenshot. Defaults to true. Set to false "
+                "only for rapid presses whose intermediate results you don't need to see (the next screenshot may then "
+                "show the game mid-animation).",
             },
         },
-        "required": ["button"],
+        "required": ["buttons"],
         "additionalProperties": False,
     }
 
     def execute(self, tool_input: dict) -> str:
-        """Process a press_button tool call."""
-        button = tool_input["button"]
+        """Process a press_buttons tool call."""
+        buttons = tool_input.get("buttons") or []
         wait = tool_input.get("wait", True)
+        if not buttons:
+            return "Error: buttons must contain at least one button."
+        if len(buttons) > MAX_BUTTONS_PER_CALL:
+            return f"Error: at most {MAX_BUTTONS_PER_CALL} buttons per call; got {len(buttons)}."
+        invalid = [button for button in buttons if button not in BUTTONS]
+        if invalid:
+            return f"Error: invalid buttons {invalid}; valid buttons are {BUTTONS}."
 
-        logger.info(f"[Button] Pressing: {button} (wait={wait})")
-        self.emulator.press_buttons([button], wait)
+        logger.info(f"[Button] Pressing: {buttons} (wait={wait})")
+        self.emulator.press_buttons(buttons, wait)
 
-        return f"Pressed button: {button}"
+        return f"Pressed buttons: {', '.join(buttons)}"
 
 
 class NavigateToScreenCoordinatesTool(Tool):
-    """Tool for navigating to a position on the map grid."""
+    """Tool for walking to a visible cell of the screenshot's coordinate grid."""
 
     name = "navigate_to_screen_coordinates"
-    description = "Automatically navigate to the specified map coordinates on the current screen. The screen is divided into a grid and the available coordinates are rendered in the provided screenshot. This tool is only available in the overworld."
+    description = (
+        "Walk the player to a cell that is visible on the current screen, following a path around obstacles. "
+        "Outside of battle the screenshot is overlaid with a grid; each cell is labeled (x,y) with its absolute map "
+        "coordinates, the same coordinates as map_coordinates in the game state. Pass the x and y from a labeled "
+        "cell. The player stands in the unlabeled cell at the center of the grid, and only the cells on screen "
+        "(x from your x-4 to x+5, y from your y-4 to y+4) can be targeted. Overworld only."
+    )
     ends_turn = True
     parameters = {
         "type": "object",
         "properties": {
-            "col": {"type": "integer", "description": "The column coordinate to navigate to."},
-            "row": {"type": "integer", "description": "The row coordinate to navigate to."},
+            "x": {"type": "integer", "description": "Target x: the first number of the cell's (x,y) label."},
+            "y": {"type": "integer", "description": "Target y: the second number of the cell's (x,y) label."},
         },
-        "required": ["col", "row"],
+        "required": ["x", "y"],
         "additionalProperties": False,
     }
 
     def execute(self, tool_input: dict) -> str:
-        """Process a navigate_to tool call."""
-        row = tool_input["row"]
-        col = tool_input["col"]
-
+        """Process a navigate_to_screen_coordinates tool call."""
+        x, y = tool_input["x"], tool_input["y"]
         player_x, player_y = self.emulator.get_coordinates()
 
-        # Convert absolute coordinates to screen-relative coordinates
-        # In the screen grid, player is always at (4,4)
-        # We need to convert the target absolute coordinates to screen-relative
-        target_screen_row = row - player_y + 4
-        target_screen_col = col - player_x + 4
+        # The player is always at screen cell (row 4, col 4) of the 9x10 grid.
+        target_screen_row = y - player_y + 4
+        target_screen_col = x - player_x + 4
 
-        logger.info(f"[Navigation] Navigating to: ({row}, {col})")
+        logger.info(f"[Navigation] Navigating to: ({x}, {y}) from ({player_x}, {player_y})")
 
         if not (0 <= target_screen_row < 9 and 0 <= target_screen_col < 10):
-            return f"Navigation failed: Target coordinates ({row}, {col}) are outside the visible screen area."
+            return (
+                f"Navigation failed: ({x}, {y}) is not on screen. You are at ({player_x}, {player_y}); visible cells "
+                f"span x {player_x - 4} to {player_x + 5} and y {player_y - 4} to {player_y + 4}."
+            )
 
-        # Execute the navigation
         status, path = self.emulator.find_path(target_screen_row, target_screen_col)
         if path:
             for direction in path:
                 self.emulator.press_buttons([direction], wait=True)  # TODO: pass status in partial success case
-            result = f"Navigation successful: followed path with {len(path)} steps"
-        else:
-            result = f"Navigation failed: {status}"
-
-        # Return tool result as a dictionary
-        return result
+            return f"Navigation successful: followed path with {len(path)} steps"
+        return f"Navigation failed: {status}"
 
 
 class OnScreenKeyboardTool(Tool):

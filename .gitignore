@@ -64,3 +64,6 @@ screenshot_test.png
 # Agent memory (current run and previous run)
 memories/
 memories.old/
+
+# Impeccable design-tool scratch (decision pages, review captures, caches)
+.impeccable/

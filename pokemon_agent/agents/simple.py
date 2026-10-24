@@ -15,7 +15,7 @@ from openai.types.chat import (
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from pokemon_agent.agents.base import BaseAgent
-from pokemon_agent.agents.prompts import SUMMARY_PROMPT, SYSTEM_PROMPT
+from pokemon_agent.agents.prompts import SUMMARY_PROMPT, system_prompt
 from pokemon_agent.game.observation import GameObservation
 from pokemon_agent.llm.client import LLMConfig, LLMResponse, create_llm_adapter
 
@@ -26,7 +26,6 @@ logger = logging.getLogger(__name__)
 class SimpleAgent(BaseAgent):
     """Agent that drives an OpenAI-compatible LLM (Chat Completions or Responses) with its own history and summaries."""
 
-    system_prompt = SYSTEM_PROMPT
     summary_prompt = SUMMARY_PROMPT
 
     def __init__(self, rom_path, llm_config: LLMConfig, max_history=60, **kwargs):
@@ -40,11 +39,13 @@ class SimpleAgent(BaseAgent):
         """
         super().__init__(rom_path, **kwargs)
         self.llm_config = llm_config
+        self.system_prompt = system_prompt(llm_config.model)
         self.llm = create_llm_adapter(llm_config)
         self.max_history = max_history
         logger.info(
             f"Using provider {llm_config.provider!r} with model {llm_config.model!r} via the {llm_config.api!r} API"
         )
+        self.emit("run", agent="simple", model=llm_config.model, provider=llm_config.provider, api=llm_config.api)
 
         initial_message = self._game_state_message(
             self.observe(), prefix_content="You may now begin playing.\n", memory_listing=self.memory_listing()
@@ -73,8 +74,14 @@ class SimpleAgent(BaseAgent):
 
     def _execute_tool_call(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
         """Execute an OpenAI-format tool call and return the tool result message."""
-        result = self.tool_factory.execute_tool(tool_call.function.name, json.loads(tool_call.function.arguments))
+        result = self.run_tool(tool_call.function.name, json.loads(tool_call.function.arguments))
         return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+
+    def _emit_usage(self, usage):
+        input_tokens = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
+        output_tokens = getattr(usage, "output_tokens", None) or getattr(usage, "completion_tokens", None)
+        if input_tokens is not None:
+            self.emit("usage", input=input_tokens, output=output_tokens)
 
     def _system_message(self) -> ChatCompletionSystemMessageParam:
         return {"role": "system", "content": self.system_prompt}
@@ -104,6 +111,7 @@ class SimpleAgent(BaseAgent):
             num_steps: Number of steps to run for
         """
         logger.info(f"Starting agent loop for {num_steps} steps")
+        self.emit("run_start", steps=num_steps)
         steps_completed = 0
         while self.running and steps_completed < num_steps:
             try:
@@ -112,6 +120,7 @@ class SimpleAgent(BaseAgent):
                 )  # type: ignore
                 response = self._generate(messages, self.tool_factory.get_available_tools())
                 logger.info(f"Agent response usage: {response.usage}")
+                self._emit_usage(response.usage)
 
                 # Add response to message history
                 self.message_history.extend(response.history_items)
@@ -119,6 +128,7 @@ class SimpleAgent(BaseAgent):
                 # Display the model's reasoning
                 if response.text:
                     logger.info(f"[Text] {response.text}")
+                    self.emit("thought", text=response.text, step=steps_completed + 1)
                 else:
                     logger.info("[No Text] No text response from model")
 
@@ -155,6 +165,7 @@ class SimpleAgent(BaseAgent):
                 raise e  # skips saving state, handled in main.py
 
         self.save_state()
+        self.emit("run_end", steps=steps_completed)
         return steps_completed
 
     def summarize_history(self):
@@ -177,6 +188,7 @@ class SimpleAgent(BaseAgent):
 
         logger.info(f"Summary response usage: {response.usage}")
         summary_text = response.text or "Summary generation failed."
+        self.emit("summary", text=summary_text, messages=len(self.message_history))
         logger.info("[Agent] Game Progress Summary:")
         logger.info(f"{summary_text}")
 

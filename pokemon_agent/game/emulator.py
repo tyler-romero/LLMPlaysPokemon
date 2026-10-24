@@ -28,11 +28,19 @@ class Emulator:
                 sound=sound,
                 sound_volume=50 if sound else 0,
             )
+        # Optional observers: frame_listener(screen_rgba, stereo_int8_samples) after every frame, and
+        # button_listener(button, wait) for every button press.
+        self.frame_listener = None
+        self.button_listener = None
+        self._sound_emulated = hasattr(self.pyboy.sound.raw_ndarray, "shape")
 
     def tick(self, frames):
         """Advance the emulator by the specified number of frames."""
         for _ in range(frames):
             self.pyboy.tick()
+            if self.frame_listener:
+                sound = self.pyboy.sound.ndarray if self._sound_emulated else None
+                self.frame_listener(self.pyboy.screen.ndarray, sound)
 
     def initialize(self):
         """Initialize the emulator."""
@@ -117,6 +125,8 @@ class Emulator:
                 results.append(f"Invalid button: {button}")
                 raise ValueError(f"Invalid button: {button}")
 
+            if self.button_listener:
+                self.button_listener(button, wait)
             self.pyboy.button_press(button)
             self.tick(10)  # Press briefly
             self.pyboy.button_release(button)

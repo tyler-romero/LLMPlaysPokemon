@@ -1,7 +1,7 @@
 import logging
 
 from pokemon_agent.tools.base import Tool
-from pokemon_agent.tools.game_tools import NavigateToScreenCoordinatesTool, OnScreenKeyboardTool, PressButtonTool
+from pokemon_agent.tools.game_tools import NavigateToScreenCoordinatesTool, OnScreenKeyboardTool, PressButtonsTool
 from pokemon_agent.tools.memory_tools import (
     MemoryCreateTool,
     MemoryDeleteTool,
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 TOOL_CLASSES: dict[str, type[Tool]] = {
     tool_class.name: tool_class
     for tool_class in [
-        PressButtonTool,
+        PressButtonsTool,
         NavigateToScreenCoordinatesTool,
         OnScreenKeyboardTool,
         MemoryViewTool,
@@ -27,7 +27,7 @@ TOOL_CLASSES: dict[str, type[Tool]] = {
 }
 
 DEFAULT_TOOL_NAMES = [
-    "press_button",
+    "press_buttons",
     "navigate_to_screen_coordinates",
     "on_screen_keyboard_input",
     "view",

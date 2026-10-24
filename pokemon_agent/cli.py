@@ -3,11 +3,14 @@ import dataclasses
 import logging
 import os
 import sys
+import time
 
 from pokemon_agent.agents.base import BaseAgent
 from pokemon_agent.agents.copilot import CopilotAgent
 from pokemon_agent.agents.simple import SimpleAgent
 from pokemon_agent.config import COPILOT_AGENT, SIMPLE_AGENT_LLM
+from pokemon_agent.observer.hub import ObserverHub
+from pokemon_agent.observer.server import ObserverServer
 
 # Set up logging
 logging.basicConfig(
@@ -64,6 +67,13 @@ def main():
         "--web-output", action="store_true", help="Save latest screenshots to ./web_output/ for web viewing"
     )
 
+    parser.add_argument(
+        "--observe",
+        action="store_true",
+        help="Serve a live observer page (game, audio, model log, inputs, party, memory) while the agent runs",
+    )
+    parser.add_argument("--observe-port", type=int, default=8765, help="Port for the observer page (default: 8765)")
+
     args = parser.parse_args()
 
     # Validate conflicting arguments
@@ -91,6 +101,8 @@ def main():
             logger.error(f"Failed to create web output directory {web_output_dir}: {e}")
             sys.exit(1)
 
+    observer = ObserverHub() if args.observe else None
+
     # Create and run agent
     agent = AGENT_BUILDERS[args.agent](
         args,
@@ -100,7 +112,18 @@ def main():
         save_every=args.save_every,
         load_state=args.load_state,
         web_output_dir=web_output_dir,
+        observer=observer,
     )
+
+    server = None
+    if observer:
+        try:
+            server = ObserverServer(observer, agent.memory, port=args.observe_port).start()
+        except OSError as e:
+            logger.error(f"Could not start the observer page on port {args.observe_port}: {e}")
+            agent.stop()
+            sys.exit(1)
+        print(f"\nObserver page: {server.url}\n", flush=True)
 
     try:
         logger.info(f"Starting agent for {args.steps} steps")
@@ -113,6 +136,20 @@ def main():
     finally:
         logger.info("Stopping agent")
         agent.stop()
+        if server:
+            _keep_observer_open(server)
+
+
+def _keep_observer_open(server: ObserverServer):
+    """Leave the observer page up after the run so its final state can be inspected."""
+    print(f"\nRun finished. The observer page is still at {server.url} — press Ctrl-C to exit.", flush=True)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
 
 
 if __name__ == "__main__":

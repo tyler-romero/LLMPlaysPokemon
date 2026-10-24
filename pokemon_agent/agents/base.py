@@ -5,10 +5,21 @@ from abc import ABC, abstractmethod
 
 from pokemon_agent.game.emulator import Emulator
 from pokemon_agent.game.observation import GameObservation, get_screenshot_base64
-from pokemon_agent.memory.store import MemoryStore, reset_memory, snapshot_memory
+from pokemon_agent.memory.store import MEMORY_TOOL_SPECS, MemoryStore, reset_memory, snapshot_memory
+from pokemon_agent.observer.hub import ObserverHub
 from pokemon_agent.tools.factory import ToolFactory
 
 logger = logging.getLogger(__name__)
+
+# Tool results that begin with one of these report a failed call (tools return errors as text for the model).
+TOOL_FAILURE_PREFIXES = (
+    "error",
+    "navigation failed",
+    "invalid",
+    "no match found",
+    "multiple matches found",
+    "path already exists",
+)
 
 
 class BaseAgent(ABC):
@@ -27,6 +38,7 @@ class BaseAgent(ABC):
         save_every=100,
         load_state=None,
         web_output_dir=None,
+        observer: ObserverHub | None = None,
     ):
         """Initialize the emulator and tools.
 
@@ -37,7 +49,10 @@ class BaseAgent(ABC):
             save_every: Number of steps between save_state() calls
             load_state: Path to a saved state file to load; its memory snapshot is restored if one exists
             web_output_dir: Directory to save latest.png for web viewing
+            observer: Hub that streams the run to the observer page, if enabled
         """
+        self.observer = observer
+        self._tool_calls = 0
         self.emulator = Emulator(rom_path, headless, sound=sound)
         self.emulator.initialize()
 
@@ -59,7 +74,30 @@ class BaseAgent(ABC):
         self.memory = MemoryStore()
         self.tool_factory = ToolFactory(self.emulator, self.tool_names)
 
+        if observer:
+            self.emulator.frame_listener = observer.on_frame
+            self.emulator.button_listener = observer.on_button
         self._save_web_screenshot()
+
+    def emit(self, kind: str, **data):
+        """Publish an event to the observer page, if one is attached."""
+        if self.observer:
+            self.observer.publish(kind, **data)
+
+    def run_tool(self, name: str, tool_input: dict) -> str:
+        """Execute a tool, reporting the call and its result to the observer."""
+        self._tool_calls += 1
+        call_id = self._tool_calls
+        self.emit("tool", id=call_id, name=name, args=tool_input)
+        try:
+            result = self.tool_factory.execute_tool(name, tool_input)
+        except Exception as e:
+            self.emit("tool_result", id=call_id, result=f"{type(e).__name__}: {e}", ok=False)
+            raise
+        self.emit("tool_result", id=call_id, result=result, ok=not result.lower().startswith(TOOL_FAILURE_PREFIXES))
+        if name in MEMORY_TOOL_SPECS and name != "view":
+            self.memory_listing()
+        return result
 
     @staticmethod
     def _start_memory(load_state: str | None):
@@ -77,7 +115,9 @@ class BaseAgent(ABC):
             snapshot_memory(f"{state_path}.memories")
 
     def memory_listing(self) -> str:
-        return self.memory.listing()
+        listing = self.memory.listing()
+        self.emit("memory", listing=listing)
+        return listing
 
     @staticmethod
     def game_state_sections(observation: GameObservation, memory_listing: str | None = None) -> list[str]:
@@ -103,6 +143,7 @@ class BaseAgent(ABC):
         screenshot = self.emulator.get_screenshot()
         screenshot_b64 = get_screenshot_base64(self.emulator, screenshot)
         memory_info, location, coords = self.emulator.get_state_from_memory()
+        self.emit("state", state=memory_info)
 
         logger.info("[Memory State after action]")
         logger.info(memory_info)
@@ -133,6 +174,7 @@ class BaseAgent(ABC):
     def _on_step_complete(self, steps_completed: int, num_steps: int):
         """Log progress, refresh the web screenshot, and periodically save emulator state and memory."""
         logger.info(f"Completed step {steps_completed}/{num_steps}")
+        self.emit("step", step=steps_completed, total=num_steps)
         self._save_web_screenshot()
         if steps_completed % self.save_every == 0 and steps_completed > 0:
             self.save_state()

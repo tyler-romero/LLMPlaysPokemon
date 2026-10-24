@@ -50,7 +50,7 @@ Configure its LLM with `SIMPLE_AGENT_LLM` in `pokemon_agent/config.py`.
 
 Runs on a [GitHub Copilot SDK](https://github.com/github/copilot-sdk) session, which handles the model/tool loop and
 compacts context automatically. Each step sends the game state with the screenshot attached; the model can call
-tools within a step, and the step ends after a game action (`press_button`, `navigate_to_screen_coordinates`,
+tools within a step, and the step ends after a game action (`press_buttons`, `navigate_to_screen_coordinates`,
 `on_screen_keyboard_input`) so the model always acts on a fresh screenshot. Only the game tools are available to the
 model; the SDK's built-in tools are disabled.
 
@@ -60,6 +60,21 @@ model is used. The model must support image input.
 
 The SDK downloads its runtime on first use (or run `uv run python -m copilot download-runtime` ahead of time).
 Session state and logs are written to `.copilot-sdk/`.
+
+## Observer
+
+Run with `--observe` to watch a run in your browser:
+
+```
+uv run pokemon-agent --agent copilot --observe
+```
+
+Open the printed URL (default `http://127.0.0.1:8765/`). The page shows the live game screen with optional game
+audio (off until you turn it on), the model's dialogue and tool calls per step with timings, a battle-text narration of
+each action, the button-press history, the party, location and badges, and the agent's `/memories` files. The memory
+reader follows the files the model reads and writes until you click a file. The page is read-only, desktop-only, and
+stays up after the run ends until you press Ctrl-C. The pixel font loads from Google Fonts; offline it falls back to a
+system monospace.
 
 ## Memory
 
@@ -86,6 +101,8 @@ Optional arguments:
 - `--sound`: Enable sound (only applicable with display)
 - `--agent`: Agent to run: `simple` or `copilot` (default: `simple`)
 - `--model`: Model to use, overriding the agent's model in `pokemon_agent/config.py`
+- `--observe`: Serve the live observer page while the agent runs (see [Observer](#observer))
+- `--observe-port`: Port for the observer page (default: 8765)
 - `--max-history`: Maximum number of messages in history before summarization, for the `simple` agent (default: 30)
 - `--save-every`: Number of steps between save states (default: 100)
 - `--load-state`: Path to a saved state to load
@@ -109,7 +126,7 @@ clients; tools use the game; the game knows nothing about LLMs.
   - `observation.py`: Screenshot grid annotation and the per-step `GameObservation`
 - `tools/`: Tools exposed to the model; each implements `execute(tool_input: dict) -> str` with no LLM SDK types
   - `base.py`: `Tool` base class
-  - `game_tools.py`: `press_button`, `navigate_to_screen_coordinates`, `on_screen_keyboard_input`
+  - `game_tools.py`: `press_buttons`, `navigate_to_screen_coordinates`, `on_screen_keyboard_input`
   - `memory_tools.py`: `view`, `create`, `edit`, `delete`, `rename` over `/memories`
   - `factory.py`: Tool registry and `ToolFactory`
 - `memory/store.py`: File-based memory store, tool schemas, and save-state snapshots
@@ -120,6 +137,7 @@ clients; tools use the game; the game knows nothing about LLMs.
   - `copilot.py`, `copilot_config.py`: `CopilotAgent`, which runs on a GitHub Copilot SDK session, and its settings
   - `prompts.py`: System and summarization prompts
 - `config.py`: Per-agent configuration
+- `observer/`: Live observer page: event hub, local HTTP/SSE server, and the static page
 - `cli.py`: CLI and the `AGENT_BUILDERS` registry
 
 ### How It Works

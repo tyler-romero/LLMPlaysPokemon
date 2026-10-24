@@ -7,6 +7,7 @@ from copilot import CopilotClient, Tool, ToolInvocation, ToolResult, ToolSet
 from copilot.session import PermissionHandler
 from copilot.session_events import (
     AssistantMessageData,
+    AssistantReasoningData,
     AssistantUsageData,
     SessionCompactionCompleteData,
     SessionErrorData,
@@ -17,7 +18,7 @@ from copilot.session_events import (
 
 from pokemon_agent.agents.base import BaseAgent
 from pokemon_agent.agents.copilot_config import CopilotAgentConfig
-from pokemon_agent.agents.prompts import SYSTEM_PROMPT
+from pokemon_agent.agents.prompts import system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,6 @@ class CopilotAgent(BaseAgent):
     step; tools with `ends_turn` (game actions) end it, so the model always acts on a fresh screenshot.
     """
 
-    system_prompt = SYSTEM_PROMPT
 
     def __init__(self, rom_path, config: CopilotAgentConfig, **kwargs):
         """Initialize the Copilot SDK agent.
@@ -54,13 +54,15 @@ class CopilotAgent(BaseAgent):
         """
         super().__init__(rom_path, **kwargs)
         self.config = config
+        self.system_prompt = system_prompt(config.model)
         self.steps_completed = 0
         logger.info(f"Using Copilot SDK with GitHub Copilot model {config.model or 'default'!r}")
+        self.emit("run", agent="copilot", model=config.model or "Copilot default", provider="GitHub Copilot")
 
     def _sdk_tools(self) -> list[Tool]:
         def make_handler(name: str):
             def handler(invocation: ToolInvocation) -> ToolResult:
-                result = self.tool_factory.execute_tool(name, invocation.arguments or {})
+                result = self.run_tool(name, invocation.arguments or {})
                 self._save_web_screenshot()
                 return ToolResult(text_result_for_llm=result)
 
@@ -92,12 +94,22 @@ class CopilotAgent(BaseAgent):
         match event.data:
             case AssistantMessageData(content=content) if content:
                 logger.info(f"[Text] {content}")
+                self.emit("thought", text=content, step=self.steps_completed + 1)
+            case AssistantReasoningData(content=content) if content:
+                self.emit("thought", text=content, reasoning=True, step=self.steps_completed + 1)
             case ToolExecutionStartData(tool_name=name, arguments=arguments):
                 logger.info(f"[Tool] Using tool {name} with args {arguments}")
             case AssistantUsageData() as usage:
                 logger.info(f"Agent response usage: input={usage.input_tokens} output={usage.output_tokens}")
+                self.emit("usage", input=usage.input_tokens, output=usage.output_tokens)
             case SessionCompactionCompleteData() as compaction:
                 logger.info(f"[Agent] Context compacted: success={compaction.success}")
+                self.emit(
+                    "summary",
+                    text=compaction.summary_content or "",
+                    before=compaction.pre_compaction_tokens,
+                    after=compaction.post_compaction_tokens,
+                )
             case SessionWarningData(message=message):
                 logger.warning(f"[Copilot] {message}")
             case SessionErrorData(message=message):
@@ -133,6 +145,7 @@ class CopilotAgent(BaseAgent):
             num_steps: Number of steps to run for
         """
         logger.info(f"Starting agent loop for {num_steps} steps")
+        self.emit("run_start", steps=num_steps)
         try:
             asyncio.run(self._run_async(num_steps))
         except KeyboardInterrupt:
@@ -143,4 +156,5 @@ class CopilotAgent(BaseAgent):
             raise e  # skips saving state, handled in main.py
 
         self.save_state()
+        self.emit("run_end", steps=self.steps_completed)
         return self.steps_completed

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Plays Pokémon · Observer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap">
+<link rel="stylesheet" href="/observer.css">
+</head>
+<body>
+<!--
+THESIS: The observer speaks Pokémon Red's own interface: model turns arrive as dialogue boxes, the team is the
+party screen, each action is narrated like battle text. Refuses the dark stream overlay of panels and cards.
+OWN-WORLD: Game Boy paper #f8f8f0 and ink #181818, HP green/yellow/red as the only color; double-ruled notched
+text-box frames on the 8px tile grid; rank by inverted black plates and the ▶ cursor; one pixel type size.
+STORY: The researcher glances over from the terminal and sees what the model just did, why, how fast it is going,
+whether it is stuck, and the state of its team and memory.
+FIRST VIEWPORT: Black status plate across the top; game at integer scale on the left with the narration box under
+it; the dialogue log fills the right; inputs and the party screen sit under the game.
+FORM: Pokémon Red field kit, position 4 on the ordered list, seed key 31eec541.
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
+-->
+<svg class="sprites" aria-hidden="true" focusable="false">
+  <symbol id="i-up" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M6 1h4v5H6z" fill="currentColor"/></symbol>
+  <symbol id="i-down" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M6 10h4v5H6z" fill="currentColor"/></symbol>
+  <symbol id="i-left" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M1 5h5v6H1z" fill="currentColor"/></symbol>
+  <symbol id="i-right" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M10 5h5v6h-5z" fill="currentColor"/></symbol>
+  <symbol id="i-a" viewBox="0 0 16 16"><path d="M5 1h6v1h2v2h1v2h1v4h-1v2h-1v2h-2v1H5v-1H3v-2H2v-2H1V6h1V4h1V2h2z" fill="currentColor"/><path d="M7 4h2v1h1v2h1v5H9v-2H7v2H5V7h1V5h1zm0 2v2h2V6z" style="fill: var(--icon-lit)"/></symbol>
+  <symbol id="i-b" viewBox="0 0 16 16"><path d="M5 1h6v1h2v2h1v2h1v4h-1v2h-1v2h-2v1H5v-1H3v-2H2v-2H1V6h1V4h1V2h2z" fill="currentColor"/><path d="M5 4h5v1h1v2h-1v1h1v3h-1v1H5zm2 2v1h2V6zm0 3v1h2V9z" style="fill: var(--icon-lit)"/></symbol>
+  <symbol id="i-start" viewBox="0 0 16 16"><path d="M3 4h10v1h1v6h-1v1H3v-1H2V5h1z" fill="currentColor"/><path d="M6 6h1v1h1v1h1v1H8v1H7v1H6z" style="fill: var(--icon-lit)"/></symbol>
+  <symbol id="i-select" viewBox="0 0 16 16"><path d="M3 4h10v1h1v6h-1v1H3v-1H2V5h1z" fill="currentColor"/><path d="M5 6h6v1H5zm0 2h6v1H5zm0 2h4v1H5z" style="fill: var(--icon-lit)"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 8 8"><path d="M1 0h1v1h1v1h1v1h1v2H4v1H3v1H2v1H1z"/></symbol>
+  <symbol id="i-tool-pending" viewBox="0 0 8 8"><path d="M1 3h2v2H1zm4 0h2v2H5z"/></symbol>
+  <symbol id="i-tool-ok" viewBox="0 0 8 8"><path d="M0 4h2v1H0zm1 1h2v1H1zm1 1h2v1H2zm2-1h2v1H4zm1-1h2v1H5zm1-1h2v1H6zm1-1h1v1H7z"/></symbol>
+  <symbol id="i-tool-failed" viewBox="0 0 8 8"><path d="M1 1h2v1H1zm4 0h2v1H5zM2 2h2v1H2zm2 0h2v1H4zM3 3h2v2H3zM2 5h2v1H2zm2 0h2v1H4zM1 6h2v1H1zm4 0h2v1H5z"/></symbol>
+  <symbol id="i-more" viewBox="0 0 8 8"><path d="M0 2h7v1H6v1H5v1H4v1H3V5H2V4H1V3H0z"/></symbol>
+  <symbol id="i-sound-on" viewBox="0 0 16 16"><path d="M2 6h3l4-4h1v12H9l-4-4H2z"/><path d="M12 4h1v1h1v6h-1v1h-1v-1h1V5h-1z"/></symbol>
+  <symbol id="i-sound-off" viewBox="0 0 16 16"><path d="M2 6h3l4-4h1v12H9l-4-4H2z"/><path d="M11 5h1v1h1V5h1v1h-1v1h1v1h-1v1h1v1h-1V9h-1v1h-1V9h1V8h-1V7h1V6h-1z"/></symbol>
+</svg>
+
+<div class="shell" id="shell" data-connection="connecting">
+  <header class="plate" aria-label="Run status">
+    <h1 class="plate__title">LLM PLAYS POKéMON</h1>
+    <dl class="plate__facts">
+      <div><dt>Agent</dt><dd id="run-agent">—</dd></div>
+      <div><dt>Model</dt><dd id="run-model">—</dd></div>
+      <div><dt>Step</dt><dd id="run-step" class="num">—</dd></div>
+      <div><dt>Time</dt><dd id="run-time" class="num">—</dd></div>
+      <div><dt>Context</dt><dd id="run-tokens" class="num">—</dd></div>
+    </dl>
+    <p class="plate__connection" id="connection" role="status">CONNECTING</p>
+    <button class="sound" id="sound" type="button" aria-pressed="false">
+      <svg class="sound__icon" aria-hidden="true"><use href="#i-sound-off"/></svg>
+      <span class="sound__label">SOUND OFF</span>
+    </button>
+  </header>
+
+  <div class="stage">
+  <section class="screen" aria-label="Game screen">
+    <div class="screen__bezel">
+      <canvas id="game" width="160" height="144" aria-label="Live game screen"></canvas>
+      <p class="screen__empty" id="screen-empty">Waiting for the emulator…</p>
+    </div>
+    <div class="textbox narration" aria-live="polite">
+      <p id="narration">Waiting for a run to start.</p>
+    </div>
+  </section>
+
+  <section class="party" aria-labelledby="party-title">
+    <h2 class="label" id="party-title"><span>PARTY</span><span class="label__aside" id="party-count"></span></h2>
+    <ol class="party__list" id="party"></ol>
+    <p class="empty" id="party-empty">No Pokémon yet.</p>
+  </section>
+  </div>
+
+  <section class="log" aria-labelledby="log-title">
+    <h2 class="label" id="log-title"><span>MODEL</span><span class="label__aside" id="log-status">IDLE</span></h2>
+    <ol class="log__list" id="log"></ol>
+    <p class="empty" id="log-empty">The model's turns will appear here.</p>
+    <button class="latest" id="latest" type="button" hidden>
+      <svg aria-hidden="true"><use href="#i-more"/></svg>LATEST
+    </button>
+  </section>
+
+  <div class="side">
+  <section class="where textbox" aria-label="Location and progress">
+    <div class="where__top">
+      <p class="where__place" id="where-place">—</p>
+      <ol class="badges" id="badges" aria-label="Badges"></ol>
+    </div>
+    <p class="where__facts">
+      <span id="where-coords" class="num" title="Map position">—</span>
+      <span id="where-money" class="num" title="Money">—</span>
+      <span id="where-trainers" title="Trainer and rival">—</span>
+      <span id="badge-count" class="num">0/8 badges</span>
+    </p>
+  </section>
+
+  <section class="inputs" aria-labelledby="inputs-title">
+    <h2 class="label" id="inputs-title"><span>INPUTS</span><span class="label__aside num" id="input-count">0</span></h2>
+    <ol class="inputs__roll" id="inputs" aria-live="off"></ol>
+    <p class="empty" id="inputs-empty">No buttons pressed yet.</p>
+  </section>
+
+
+
+  <section class="memory" aria-labelledby="memory-title">
+    <h2 class="label" id="memory-title"><span>MEMORY</span><span class="label__aside">/memories</span></h2>
+    <ul class="memory__files" id="memory-files"></ul>
+    <p class="empty" id="memory-empty">No memory files yet.</p>
+    <div class="memory__reader" id="memory-reader" hidden>
+      <div class="memory__current">
+        <p id="memory-current" aria-live="polite"></p>
+        <button class="memory__follow" id="memory-follow" type="button" hidden>Follow model</button>
+      </div>
+      <pre class="memory__view" id="memory-view"></pre>
+    </div>
+  </section>
+  </div>
+</div>
+
+<script src="/observer.js" defer></script>
+</body>
+</html>
