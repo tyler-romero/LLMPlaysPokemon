@@ -1,8 +1,6 @@
 "use strict";
 
 const BADGES = ["BOULDER", "CASCADE", "THUNDER", "RAINBOW", "SOUL", "MARSH", "VOLCANO", "EARTH"];
-const INPUT_ICONS = { a: "i-a", b: "i-b", up: "i-up", down: "i-down", left: "i-left", right: "i-right", start: "i-start", select: "i-select" };
-const MAX_CHIPS = 40;
 const MAX_LOG_ENTRIES = 600;
 const SLOW_STEP_SECONDS = 60;
 const TYPE_RATE = 1400; // characters per second for the newest dialogue box
@@ -35,9 +33,16 @@ const ui = {
   logEmpty: $("log-empty"),
   logStatus: $("log-status"),
   latest: $("latest"),
-  inputs: $("inputs"),
-  inputsEmpty: $("inputs-empty"),
-  inputCount: $("input-count"),
+  tools: $("tools"),
+  toolsTable: $("tools-table"),
+  toolsEmpty: $("tools-empty"),
+  toolCount: $("tool-count"),
+  objectiveBody: $("objective-body"),
+  objectiveMedium: $("objective-medium"),
+  objectiveMediumTerm: $("objective-medium-term"),
+  objectiveShort: $("objective-short"),
+  objectiveEmpty: $("objective-empty"),
+  objectiveAge: $("objective-age"),
   party: $("party"),
   partyEmpty: $("party-empty"),
   partyCount: $("party-count"),
@@ -64,10 +69,13 @@ const run = {
   tools: new Map(),
   latestThought: null,
   follow: true,
-  memory: { selected: null, followModel: true, reason: null, activity: new Map(), listing: "" },
+  memory: { selected: null, followModel: true, reason: null, activity: new Map(), listing: "", updated: {} },
 };
 
-const MEMORY_ACTIONS = { view: "READ", create: "WROTE", edit: "EDITED", delete: "DELETED", rename: "MOVED" };
+const MEMORY_ACTIONS = {
+  view: "READ", create: "WROTE", edit: "EDITED", insert: "ADDED TO", delete: "DELETED", rename: "MOVED",
+  save_screenshot: "SAVED",
+};
 
 // ---------- formatting ----------
 
@@ -79,22 +87,30 @@ const formatDuration = (seconds) => {
 };
 const formatTokens = (n) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
 const agentName = () => (run.agent || "The model").toUpperCase();
+// Events from a helper (the subagent tool) carry actor: "helper"; the main agent's carry none.
+const actorName = (event) => (event.actor === "helper" ? "HELPER" : agentName());
 const compactArgs = (args) => {
   const text = JSON.stringify(args ?? {});
   return text.length > 160 ? `${text.slice(0, 157)}…` : text;
 };
 
-function narrate(name, args) {
-  const who = agentName();
+function narrate(name, args, who = agentName()) {
   switch (name) {
     case "press_buttons": return `${who} pressed ${(args.buttons || []).join(", ").toUpperCase()}!`;
-    case "navigate_to_screen_coordinates": return `${who} walked toward (${args.x}, ${args.y}).`;
     case "on_screen_keyboard_input": return `${who} typed "${args.text}".`;
     case "view": return `${who} read ${args.path}.`;
+    case "list": return `${who} listed ${args.path || "/memories"}.`;
+    case "save_screenshot": return `${who} saved a screenshot to ${args.path}.`;
+    case "history": return `${who} searched its history${args.query ? ` for "${args.query}"` : ""}.`;
     case "create": return `${who} wrote ${args.path}.`;
     case "edit": return `${who} updated ${args.path}.`;
+    case "insert": return `${who} added to ${args.path}.`;
     case "delete": return `${who} deleted ${args.path}.`;
     case "rename": return `${who} moved ${args.old_path} to ${args.new_path}.`;
+    case "subagent": return `${who} asked a helper for an analysis.`;
+    case "objective": return `${who} set its objective: ${args.short_term ?? args.goal}`;
+    case "trigger_compaction": return `${who} asked to condense its history.`;
+    case "finish": return `${who} wrapped up its task.`;
     default: return `${who} used ${name.toUpperCase()}!`;
   }
 }
@@ -183,6 +199,7 @@ ui.sound.addEventListener("click", () => audio.toggle());
 // ---------- status plate ----------
 
 function renderRun(info) {
+  if (Array.isArray(info.tools)) setToolDefs(info.tools, info.helper_tools);
   if (info.agent) run.agent = info.agent;
   $("run-agent").textContent = info.agent ? info.agent.toUpperCase() : $("run-agent").textContent;
   if (info.model) $("run-model").textContent = info.model;
@@ -262,49 +279,181 @@ function renderParty(party) {
   }));
 }
 
-// ---------- inputs ----------
+// ---------- objective ----------
 
-function addInput(event, { animate = true } = {}) {
-  ui.inputsEmpty.hidden = true;
-  const first = ui.inputs.firstElementChild;
-  if (first && first.dataset.button === event.button) {
-    const count = Number(first.dataset.count) + 1;
-    first.dataset.count = String(count);
-    first.querySelector(".inputs__count").textContent = `x${count}`;
+// { long_term, medium_term, short_term, turn }; earlier objectives lack medium_term, and older runs have { goal, plan }.
+// The long term isn't shown: the model tends to restate the whole game's goal there.
+let objective = null;
+
+function renderObjective(next = objective) {
+  objective = next || null;
+  ui.objectiveBody.hidden = !objective;
+  ui.objectiveEmpty.hidden = Boolean(objective);
+  if (!objective) {
+    ui.objectiveAge.textContent = "";
     return;
   }
-  const chip = el("li", "chip");
-  chip.dataset.button = event.button;
-  chip.dataset.count = "1";
-  chip.dataset.held = String(event.wait !== false);
-  chip.title = `${event.button.toUpperCase()} · step ${event.step ?? "?"}`;
-  chip.append(icon(INPUT_ICONS[event.button] || "i-a"), el("span", "inputs__count", ""));
-  chip.setAttribute("aria-label", event.button);
-  ui.inputs.prepend(chip);
-  while (ui.inputs.children.length > MAX_CHIPS) ui.inputs.lastElementChild.remove();
-  if (animate && !reducedMotion.matches) {
-    chip.animate([{ transform: "translateY(-4px)", opacity: 0.4 }, { transform: "none", opacity: 1 }], {
-      duration: 220,
-      easing: "cubic-bezier(0.16, 1, 0.3, 1)",
-    });
+  const medium = objective.medium_term ?? objective.goal;
+  ui.objectiveMedium.textContent = medium || "";
+  ui.objectiveMedium.hidden = ui.objectiveMediumTerm.hidden = !medium;
+  ui.objectiveShort.textContent = objective.short_term ?? objective.plan;
+  const ago = Math.max(0, run.step + 1 - objective.turn);
+  ui.objectiveAge.textContent = ago === 0 ? "this turn" : `${ago} turn${ago === 1 ? "" : "s"} ago`;
+  ui.objectiveAge.title = `Stated on turn ${objective.turn}`;
+}
+
+// ---------- tool stats ----------
+
+// Whole-run totals per tool come in the snapshot (the log only replays recent events); live events update them.
+const toolStats = { byName: {}, names: new Map() };
+
+function countTool(event) {
+  const stats = (toolStats.byName[event.name] ??= { calls: 0, failed: 0, last: 0 });
+  stats.calls += 1;
+  stats.last = run.step + 1;
+  renderToolStats();
+}
+
+function countToolResult(event) {
+  const name = toolStats.names.get(event.id);
+  toolStats.names.delete(event.id);
+  if (name && event.ok === false && toolStats.byName[name]) {
+    toolStats.byName[name].failed += 1;
+    renderToolStats();
   }
 }
 
-// ---------- model log ----------
+function renderToolStats() {
+  const entries = Object.entries(toolStats.byName).sort((a, b) => b[1].calls - a[1].calls || a[0].localeCompare(b[0]));
+  const total = entries.reduce((sum, [, stats]) => sum + stats.calls, 0);
+  const top = entries[0]?.[1].calls || 1;
+  const turn = run.step + 1;
+  ui.toolCount.textContent = total.toLocaleString();
+  ui.toolsTable.hidden = !entries.length;
+  ui.toolsEmpty.hidden = entries.length > 0;
+  ui.tools.replaceChildren(...entries.map(([name, stats]) => {
+    const row = el("tr", "tools__row");
+    const label = el("th", "tools__name");
+    label.scope = "row";
+    if (defs.tools.has(name)) {
+      const link = el("button", "tools__link", name);
+      link.type = "button";
+      link.title = `See ${name}'s definition`;
+      link.addEventListener("click", () => openToolDefs(name));
+      label.append(link);
+    } else {
+      label.append(el("span", "", name));
+    }
+    label.title = name;
+    const bar = el("span", "tools__bar");
+    bar.style.setProperty("--share", stats.calls / top);
+    label.append(bar);
+    const share = total ? Math.round((100 * stats.calls) / total) : 0;
+    const calls = el("td", "num", stats.calls.toLocaleString());
+    calls.title = `${share}% of all calls`;
+    const rate = stats.calls ? stats.failed / stats.calls : 0;
+    const failed = el("td", "num tools__failed", stats.failed ? `${Math.round(rate * 100)}%` : "—");
+    failed.title = `${stats.failed} of ${stats.calls} failed`;
+    failed.dataset.level = rate >= 0.25 ? "high" : "";
+    const ago = Math.max(0, turn - stats.last);
+    const last = el("td", "num tools__last", ago === 0 ? "now" : ago.toLocaleString());
+    last.title = `${ago} turns since the last call (turn ${stats.last})`;
+    row.append(label, calls, failed, last);
+    return row;
+  }));
+}
 
-function isAtBottom() {
-  const list = ui.log;
-  return list.scrollHeight - list.scrollTop - list.clientHeight < 64;
+// ---------- tool definitions: what the model is told about each tool ----------
+
+const defs = { tools: new Map(), helper: new Set(), dialog: $("defs") };
+
+function setToolDefs(tools, helperTools) {
+  defs.tools = new Map(tools.map((tool) => tool.function || tool).filter((fn) => fn?.name).map((fn) => [fn.name, fn]));
+  defs.helper = new Set(helperTools || []);
+  $("tool-defs").hidden = defs.tools.size === 0;
+  renderToolStats();
+}
+
+function describeType(schema) {
+  if (!schema) return "";
+  if (schema.enum) return schema.enum.map((value) => JSON.stringify(value)).join(" | ");
+  if (schema.type === "array") return `array of ${describeType(schema.items) || "any"}`;
+  return Array.isArray(schema.type) ? schema.type.join(" | ") : schema.type || "";
+}
+
+function renderToolDef(fn) {
+  const item = el("article", "defs__tool");
+  item.id = `def-${fn.name}`;
+  const head = el("header", "defs__head");
+  head.append(el("h3", "defs__name", fn.name));
+  if (defs.helper.has(fn.name)) head.append(el("span", "defs__tag", "helper too"));
+  item.append(head, el("p", "defs__desc", fn.description || ""));
+  const props = Object.entries(fn.parameters?.properties || {});
+  if (!props.length) {
+    item.append(el("p", "defs__none", "No arguments."));
+    return item;
+  }
+  const required = new Set(fn.parameters?.required || []);
+  const table = el("table", "defs__params");
+  const head2 = el("tr");
+  for (const text of ["Argument", "Type", "Description"]) head2.append(el("th", "", text));
+  table.append(el("thead"), el("tbody"));
+  table.tHead.append(head2);
+  for (const [name, schema] of props) {
+    const row = el("tr");
+    const cell = el("td", "defs__arg", name);
+    if (required.has(name)) cell.append(el("span", "defs__req", "required"));
+    row.append(cell, el("td", "defs__type", describeType(schema)), el("td", "defs__argdesc", schema.description || ""));
+    table.tBodies[0].append(row);
+  }
+  item.append(table);
+  return item;
+}
+
+function openToolDefs(name) {
+  const fns = [...defs.tools.values()];
+  $("defs-intro").textContent =
+    `The ${fns.length} tools the model can call, exactly as they are described to it.` +
+    (defs.helper.size ? ` Tools marked "helper too" are also given to the read-only subagent helper.` : "");
+  $("defs-nav").replaceChildren(...fns.map((fn) => {
+    const link = el("a", "defs__jump", fn.name);
+    link.href = `#def-${fn.name}`;
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      document.getElementById(`def-${fn.name}`)?.scrollIntoView({ block: "start" });
+    });
+    return link;
+  }));
+  $("defs-body").replaceChildren(...fns.map(renderToolDef));
+  if (!defs.dialog.open) defs.dialog.showModal();
+  const target = name && document.getElementById(`def-${name}`);
+  if (target) target.scrollIntoView({ block: "start" });
+  else $("defs-body").scrollTop = 0;
+}
+
+$("tool-defs").addEventListener("click", () => openToolDefs());
+$("defs-close").addEventListener("click", () => defs.dialog.close());
+// A click on the backdrop (outside the dialog's box) closes it too.
+defs.dialog.addEventListener("click", (event) => {
+  const box = defs.dialog.getBoundingClientRect();
+  const inside = event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom;
+  if (!inside) defs.dialog.close();
+});
+
+// ---------- model log (newest first) ----------
+
+function isAtTop() {
+  return ui.log.scrollTop < 64;
 }
 
 function pinLog() {
-  if (run.follow) ui.log.scrollTop = ui.log.scrollHeight;
+  if (run.follow) ui.log.scrollTop = 0;
 }
 
 function appendEntry(node) {
   ui.logEmpty.hidden = true;
-  ui.log.append(node);
-  while (ui.log.children.length > MAX_LOG_ENTRIES) ui.log.firstElementChild.remove();
+  ui.log.prepend(node);
+  while (ui.log.children.length > MAX_LOG_ENTRIES) ui.log.lastElementChild.remove();
   pinLog();
 }
 
@@ -314,25 +463,25 @@ for (const type of ["wheel", "pointerdown", "keydown", "touchstart"]) {
   ui.log.addEventListener(type, () => { userScrollUntil = performance.now() + 1000; }, { passive: true });
 }
 ui.log.addEventListener("scroll", () => {
-  if (performance.now() < userScrollUntil) run.follow = isAtBottom();
+  if (performance.now() < userScrollUntil) run.follow = isAtTop();
   ui.latest.hidden = run.follow;
 });
-// Content can grow after it is appended (fonts loading, text typing out, results arriving); keep following it.
+// Content can grow after it is added (fonts loading, text typing out, results arriving); keep following it.
 new ResizeObserver(pinLog).observe(ui.log);
 new MutationObserver(pinLog).observe(ui.log, { childList: true, subtree: true, characterData: true });
 document.fonts?.ready.then(pinLog);
 ui.latest.addEventListener("click", () => {
-  ui.log.scrollTop = ui.log.scrollHeight;
+  ui.log.scrollTop = 0;
   run.follow = true;
   ui.latest.hidden = true;
 });
 
-function ensureStepHeading(t) {
+function ensureStepHeading(t, actor) {
   const step = run.step + 1;
   if (run.headingStep >= step) return;
   run.headingStep = step;
   const heading = el("li", "entry entry--step");
-  heading.append(el("span", "step__name", `STEP ${step}`));
+  heading.append(el("span", "step__name", actor === "helper" ? `STEP ${step} · HELPER` : `STEP ${step}`));
   const time = el("span", "step__time");
   heading.append(time);
   run.stepHeadings.set(step, { node: heading, time, startedAt: run.stepStartedAt ?? t });
@@ -351,52 +500,94 @@ function completeStep(event) {
     heading.node.dataset.slow = String(duration > SLOW_STEP_SECONDS);
   }
   run.step = event.step;
+  renderToolStats();
+  renderObjective();
   if (event.total) run.steps = event.total;
   run.stepStartedAt = event.t;
   renderStepCount();
 }
 
-function typeOut(node, text) {
-  if (reducedMotion.matches) { node.textContent = text; return; }
+// Types segments ([node, text] pairs) out in order; setting box.dataset.done finishes them at once.
+function typeOut(box, segments) {
+  const finish = () => { for (const [node, text] of segments) node.textContent = text; };
+  if (reducedMotion.matches) { finish(); return; }
   const started = performance.now();
-  node.textContent = "";
+  for (const [node] of segments) node.textContent = "";
   const tick = (now) => {
-    if (node.dataset.done === "true") { node.textContent = text; return; }
-    const shown = Math.min(text.length, Math.floor(((now - started) / 1000) * TYPE_RATE));
-    node.textContent = text.slice(0, shown);
-    if (shown < text.length) requestAnimationFrame(tick);
+    if (box.dataset.done === "true") { finish(); return; }
+    let budget = Math.floor(((now - started) / 1000) * TYPE_RATE);
+    for (const [node, text] of segments) {
+      node.textContent = text.slice(0, Math.max(0, budget));
+      budget -= text.length;
+    }
+    if (budget < 0) requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
 }
 
-function addThought(event, { live = true } = {}) {
-  ensureStepHeading(event.t);
-  if (run.latestThought) {
-    run.latestThought.classList.remove("is-latest");
-    run.latestThought.querySelector("p").dataset.done = "true";
-  }
-  const box = el("li", "entry entry--thought textbox is-latest");
-  if (event.reasoning) box.dataset.reasoning = "true";
-  const text = el("p");
-  box.append(text, icon("i-more", "advance"));
-  run.latestThought = box;
-  appendEntry(box);
-  if (live) typeOut(text, event.text);
-  else text.textContent = event.text;
+// Reasoning summaries come in titled parts ("**Title**" then the body). Events from older runs carry only the joined
+// text, where a later part's title trails the previous sentence ("…area. **Title**\n\nbody"), so split on bold text that
+// ends a line.
+function thoughtParts(event) {
+  if (Array.isArray(event.parts) && event.parts.length) return event.parts;
+  // split() with a capture group yields [body, title, body, title, body, ...].
+  const pieces = event.text.split(/(?:^|[ \t]+)\*\*([^*\n]+)\*\*[ \t]*(?:\n|$)/m);
+  const result = [{ title: null, text: pieces[0].trim() }];
+  for (let i = 1; i < pieces.length; i += 2) result.push({ title: pieces[i].trim(), text: (pieces[i + 1] || "").trim() });
+  return result.filter((part) => part.title || part.text);
 }
 
-function addTool(event, { live = true } = {}) {
-  ensureStepHeading(event.t);
+// The model's own words to viewers are its dialogue: a text box that types out. A reasoning summary (the provider's
+// condensed account of its thinking) is secondary: a collapsed row that previews its titles.
+function addThought(event, { live = true } = {}) {
+  if (event.reasoning) {
+    addReasoning(event);
+    return;
+  }
+  if (event.actor === "helper") {
+    addHelperAnswer(event);
+    return;
+  }
+  ensureStepHeading(event.t, event.actor);
+  if (run.latestThought) {
+    run.latestThought.classList.remove("is-latest");
+    run.latestThought.dataset.done = "true";
+  }
+  const box = el("li", "entry entry--thought textbox is-latest");
+  if (event.actor) box.dataset.actor = event.actor;
+  const segments = [];
+  for (const part of thoughtParts(event)) {
+    const section = el("div", "thought__part");
+    if (part.title) {
+      const title = el("p", "thought__title");
+      section.append(title);
+      segments.push([title, part.title]);
+    }
+    const body = el("p");
+    section.append(body);
+    segments.push([body, part.text]);
+    box.append(section);
+  }
+  box.append(icon("i-more", "advance"));
+  run.latestThought = box;
+  appendEntry(box);
+  if (live) typeOut(box, segments);
+  else for (const [node, text] of segments) node.textContent = text;
+}
+
+// A collapsed one-line row (caret, bold name, summary, state icon) that reveals its output when clicked.
+function toolRow(name, summary, actor) {
   const row = el("li", "entry entry--tool");
   row.dataset.state = "pending";
+  if (actor) row.dataset.actor = actor;
   const call = el("button", "tool__call");
   call.type = "button";
   call.setAttribute("aria-expanded", "false");
   call.disabled = true;
   call.append(
     icon("i-cursor", "tool__caret"),
-    el("span", "tool__name", event.name),
-    el("span", "tool__args", compactArgs(event.args)),
+    el("span", "tool__name", name),
+    el("span", "tool__args", summary),
     icon("i-tool-pending", "tool__state"),
   );
   const result = el("pre", "tool__result");
@@ -407,9 +598,82 @@ function addTool(event, { live = true } = {}) {
     call.setAttribute("aria-expanded", String(open));
   });
   row.append(call, result);
-  run.tools.set(event.id, { row, call, result });
+  return { row, call, result };
+}
+
+function addTool(event, { live = true } = {}) {
+  ensureStepHeading(event.t, event.actor);
+  const tool = toolRow(event.name, compactArgs(event.args), event.actor);
+  run.tools.set(event.id, { ...tool, who: actorName(event) });
+  appendEntry(tool.row);
+  if (live) setActivity("ACTING", narrate(event.name, event.args || {}, actorName(event)));
+}
+
+// A quiet collapsed row (reasoning summaries, a turn's input): an ink-2 label and preview that open onto `body`.
+function foldRow(label, preview, actor) {
+  const row = el("li", "entry entry--fold");
+  if (actor) row.dataset.actor = actor;
+  const toggle = el("button", "fold__toggle");
+  toggle.type = "button";
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.append(icon("i-cursor", "tool__caret"), el("span", "fold__label", label), el("span", "fold__preview", preview));
+  const body = el("div", "fold__body");
+  body.hidden = true;
+  toggle.addEventListener("click", () => {
+    body.hidden = !body.hidden;
+    toggle.setAttribute("aria-expanded", String(!body.hidden));
+  });
+  row.append(toggle, body);
+  return { row, body };
+}
+
+function addReasoning(event) {
+  ensureStepHeading(event.t, event.actor);
+  const parts = thoughtParts(event);
+  // Every part's title, so the whole summary's outline shows while collapsed; untitled summaries preview their text.
+  const titles = parts.map((part) => part.title).filter(Boolean);
+  const preview = titles.length ? titles.join(" · ") : (parts[0]?.text || "").split("\n")[0];
+  const { row, body } = foldRow("Reasoning summary", preview, event.actor);
+  for (const part of parts) {
+    const section = el("div", "thought__part");
+    if (part.title) section.append(el("p", "thought__title", part.title));
+    section.append(el("p", "", part.text));
+    body.append(section);
+  }
   appendEntry(row);
-  if (live) setActivity("ACTING", narrate(event.name, event.args || {}));
+}
+
+// The text the model received at the start of a turn (its screenshot is attached separately), previewed by where the
+// player is, whether text is on screen, and how full the context is.
+function addPrompt(event) {
+  ensureStepHeading(event.t, event.actor);
+  const text = event.text || "";
+  const location = text.match(/"location": "([^"]+)"/)?.[1];
+  const coords = text.match(/"map_coordinates": \[\s*(\d+),\s*(\d+)\s*\]/);
+  const context = text.match(/Model context usage: [\d,]+ of [\d,]+ tokens \((\d+%)\)/)?.[1];
+  const preview = [
+    location && (coords ? `${location} (${coords[1]}, ${coords[2]})` : location),
+    /"dialog": "/.test(text) && "text on screen",
+    context && `${context} of context used`,
+  ].filter(Boolean).join(" · ") || text.split("\n")[0];
+  const { row, body } = foldRow("Turn input", preview, event.actor);
+  body.append(el("pre", "fold__pre", `${text}\n\n[+ screenshot]`));
+  appendEntry(row);
+}
+
+// A helper's reply text is its answer, which the "Helper answers" box shows in full; log it as a collapsed row.
+function addHelperAnswer(event) {
+  ensureStepHeading(event.t, event.actor);
+  // Preview the first line of prose, skipping markdown headings and emphasis.
+  const lines = event.text.split("\n").map((line) => line.replace(/[*_`]/g, "").trim()).filter(Boolean);
+  const firstLine = lines.find((line) => !line.startsWith("#")) || lines[0] || "";
+  const { row, call, result } = toolRow("answer", firstLine.length > 160 ? `${firstLine.slice(0, 157)}…` : firstLine, "helper");
+  row.dataset.state = "ok";
+  result.textContent = event.text;
+  call.disabled = false;
+  call.title = "The helper's reply · click to show it";
+  call.querySelector(".tool__state use").setAttribute("href", "#i-tool-ok");
+  appendEntry(row);
 }
 
 function addToolResult(event, { live = true } = {}) {
@@ -418,10 +682,41 @@ function addToolResult(event, { live = true } = {}) {
   const ok = event.ok !== false;
   tool.row.dataset.state = ok ? "ok" : "failed";
   tool.result.textContent = event.result;
+  // Images the tool returned (e.g. an old screenshot from history) show under the row, exactly as the model saw them.
+  for (const data of event.images || []) {
+    const image = el("img", "tool__image");
+    image.src = `data:image/png;base64,${data}`;
+    image.alt = `Image returned by ${tool.row.querySelector(".tool__name").textContent}`;
+    tool.row.append(image);
+  }
   tool.call.disabled = false;
   tool.call.title = ok ? "Succeeded · click to show output" : "Failed · click to show output";
   tool.call.querySelector(".tool__state use").setAttribute("href", ok ? "#i-tool-ok" : "#i-tool-failed");
-  if (live) setActivity("THINKING", `${agentName()} is thinking…`);
+  if (live) setActivity("THINKING", `${tool.who} is thinking…`);
+}
+
+// A helper's work: phase "start" (with its task) and phase "end" (with its answer). A read-only helper analyzes within
+// the main agent's step and reports tool calls and seconds. Older runs' helpers played the game for a number of turns,
+// and their end event carries the whole report the main agent received; show just the helper's own account from it.
+const HELPER_ACCOUNT = /The helper's own account[^\n]*\n([\s\S]*?)\s*<\/helper_report>/;
+
+function addSubagent(event, { live = true } = {}) {
+  const start = event.phase === "start";
+  const played = event.turns !== undefined || event.used !== undefined;
+  const box = el("li", "entry entry--summary entry--helper textbox");
+  const head = el("p", "summary__head");
+  const title = start ? (played ? "Helper takes over" : "Helper asked") : played ? "Helper reports back" : "Helper answers";
+  head.append(el("span", "summary__title", title));
+  let stats = "";
+  if (start) stats = played ? `up to ${event.turns} turns` : "";
+  else if (played) stats = [`${event.used} turns used`, event.reason].filter(Boolean).join(" · ");
+  else stats = `${event.tool_calls} tool call${event.tool_calls === 1 ? "" : "s"} · ${event.seconds}s`;
+  head.append(el("span", "summary__stats", stats));
+  const report = event.report || "";
+  const text = start ? event.task : (report.match(HELPER_ACCOUNT)?.[1] ?? report.replace(/<\/?helper_report>\n?/g, "")).trim();
+  box.append(head, el("p", "summary__text", text));
+  appendEntry(box);
+  if (live) setActivity("THINKING", start ? "The HELPER is analyzing…" : `${agentName()} is reading the helper's answer…`);
 }
 
 function addSummary(event) {
@@ -447,11 +742,13 @@ const relativeTime = (t) => {
   if (seconds < 10) return "now";
   if (seconds < 60) return `${Math.floor(seconds)}s ago`;
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  return `${Math.floor(seconds / 3600)}h ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
 };
 
-function renderMemory(listing = run.memory.listing) {
+function renderMemory(listing = run.memory.listing, updated = run.memory.updated) {
   run.memory.listing = listing;
+  run.memory.updated = updated || {};
   const rows = String(listing || "").split("\n").map((line) => line.trim()).filter(Boolean).map((line) => {
     const [size, path] = line.split(/\s+/);
     return { size: Number(size), path };
@@ -468,10 +765,16 @@ function renderMemory(listing = run.memory.listing) {
     button.type = "button";
     button.dataset.path = path;
     const name = el("span");
-    name.append(icon("i-cursor", "cursor"), el("span", "", path));
+    name.append(icon("i-cursor", "cursor"));
+    if (path.toLowerCase().endsWith(".png")) name.append(icon("i-photo", "memory__photo"));
+    name.append(el("span", "", path));
+    const modified = run.memory.updated[path];
+    const updatedLabel = el("span", "memory__updated", modified ? `updated ${relativeTime(modified)}` : "");
+    if (modified) updatedLabel.title = `Last updated ${new Date(modified * 1000).toLocaleString()}`;
     button.append(
       name,
       el("span", "memory__activity", activity ? `${activity.action} ${relativeTime(activity.t)}` : ""),
+      updatedLabel,
       el("span", "memory__size", `${size} B`),
     );
     if (path === run.memory.selected) button.setAttribute("aria-current", "true");
@@ -506,9 +809,23 @@ async function openMemory(path, reason) {
   ui.memoryCurrent.replaceChildren(el("b", "", reason), document.createTextNode(path));
   ui.memoryFollow.hidden = run.memory.followModel;
   try {
+    if (path.toLowerCase().endsWith(".png")) {
+      // Reload when the file changes (a screenshot can be deleted and saved again under the same path), and when the
+      // first request came too early (the model's call is shown before the file is written).
+      const version = String(run.memory.updated[path] ?? "");
+      const shown = ui.memoryView.querySelector("img");
+      if (changed || !shown || shown.dataset.version !== version) {
+        const image = el("img", "memory__image");
+        image.src = `/memory?path=${encodeURIComponent(path)}&v=${encodeURIComponent(version)}`;
+        image.alt = `Screenshot ${path}`;
+        image.dataset.version = version;
+        ui.memoryView.replaceChildren(image);
+      }
+      return;
+    }
     const response = await fetch(`/memory?path=${encodeURIComponent(path)}`);
     const text = await response.text();
-    if (text !== ui.memoryView.textContent || changed) {
+    if (text !== ui.memoryView.textContent || changed || ui.memoryView.querySelector("img")) {
       ui.memoryView.textContent = text;
       if (!reducedMotion.matches) {
         ui.memoryView.classList.remove("is-fresh");
@@ -547,14 +864,13 @@ function applySnapshot(snapshot) {
   renderRun(snapshot.run || {});
   renderState(snapshot.state);
   run.memory.activity.clear();
-  renderMemory(snapshot.memory);
+  renderMemory(snapshot.memory, snapshot.memoryUpdated);
   audio.sampleRate = snapshot.audioSampleRate || audio.sampleRate;
   drawFrame(snapshot.frame);
 
-  ui.inputs.replaceChildren();
-  ui.inputsEmpty.hidden = !snapshot.inputs?.length;
-  for (const input of snapshot.inputs || []) addInput(input, { animate: false });
-  ui.inputCount.textContent = String(snapshot.inputCount || 0);
+  objective = snapshot.objective || null;
+  toolStats.byName = structuredClone(snapshot.toolStats || {});
+  toolStats.names.clear();
 
   run.step = 0;
   resetLog();
@@ -566,8 +882,10 @@ function applySnapshot(snapshot) {
   run.endedAt = info.ended_at ?? run.endedAt;
   if (info.input_tokens) $("run-tokens").textContent = `${formatTokens(info.input_tokens)} in`;
   renderStepCount();
+  renderToolStats();
+  renderObjective();
   ui.logEmpty.hidden = ui.log.children.length > 0;
-  if (run.latestThought) run.latestThought.querySelector("p").dataset.done = "true";
+  if (run.latestThought) run.latestThought.dataset.done = "true";
   run.follow = true;
   ui.latest.hidden = true;
   pinLog();
@@ -602,22 +920,29 @@ function handle(event, options = { live: true }) {
       break;
     case "state": renderState(event.state); break;
     case "memory":
-      renderMemory(event.listing);
+      renderMemory(event.listing, event.updated);
       if (run.memory.selected) openMemory(run.memory.selected, run.memory.reason);
-      break;
-    case "input":
-      addInput(event);
-      ui.inputCount.textContent = String(Number(ui.inputCount.textContent) + 1);
       break;
     case "usage": $("run-tokens").textContent = `${formatTokens(event.input)} in`; break;
     case "thought": addThought(event, options); break;
+    case "prompt": addPrompt(event); break;
     case "tool":
       addTool(event, options);
       noteMemoryActivity(event);
+      // Replayed log events are already in the snapshot's totals; only remember their names for later results.
+      toolStats.names.set(event.id, event.name);
+      if (options.live) countTool(event);
       break;
-    case "tool_result": addToolResult(event, options); break;
+    case "tool_result":
+      addToolResult(event, options);
+      if (options.live) countToolResult(event);
+      else toolStats.names.delete(event.id);
+      break;
     case "summary": addSummary(event); break;
+    case "subagent": addSubagent(event, options); break;
+    case "objective": renderObjective(event); break;
     case "checkpoint": appendEntry(el("li", "entry entry--checkpoint", `Checkpoint saved at step ${event.step}`)); break;
+    case "notice": addNotice(event.text); break;
     case "step": completeStep(event); break;
   }
 }

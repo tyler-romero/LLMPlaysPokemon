@@ -16,9 +16,19 @@ from openai.types.chat import (
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from pokemon_agent.agents.base import BaseAgent
-from pokemon_agent.agents.prompts import SUMMARY_PROMPT, system_prompt
+from pokemon_agent.agents.prompts import (
+    AFTER_FAILURE_REFUSAL,
+    AFTER_GAME_ACTION_REFUSAL,
+    GAME_ACTION_NOT_LAST_REFUSAL,
+    RESUME_STEP_PREFIX,
+    START_STEP_PREFIX,
+    STEP_PREFIX,
+    SUMMARY_PROMPT,
+    system_prompt,
+)
 from pokemon_agent.game.observation import GameObservation
 from pokemon_agent.llm.client import LLMConfig, LLMResponse, create_llm_adapter
+from pokemon_agent.tools.base import ToolError, ToolOutput
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -36,26 +46,31 @@ class SimpleAgent(BaseAgent):
             rom_path: Path to the ROM file
             llm_config: LLM endpoint and sampling settings
             max_history: Maximum number of messages in history before summarization
-            **kwargs: BaseAgent options (headless, sound, save_every, load_state, web_output_dir)
+            **kwargs: BaseAgent options (headless, sound, save_every, load_state, observer, run)
         """
         super().__init__(rom_path, **kwargs)
         self.llm_config = llm_config
-        self.system_prompt = system_prompt(llm_config.model)
+        self.system_prompt = system_prompt(llm_config.model, agent="simple")
         self.llm = create_llm_adapter(llm_config)
         self.max_history = max_history
         logger.info(
             f"Using provider {llm_config.provider!r} with model {llm_config.model!r} via the {llm_config.api!r} API"
         )
-        self.emit("run", agent="simple", model=llm_config.model, provider=llm_config.provider, api=llm_config.api)
+        self.emit(
+            "run",
+            agent="simple",
+            model=llm_config.model,
+            provider=llm_config.provider,
+            api=llm_config.api,
+            tools=self.tool_factory.get_available_tools(),
+        )
 
         self._history_mark = 0
         self._failed = False
         if self.resume_checkpoint:
             self.restore_agent_state(self.resume_checkpoint / "agent")
         else:
-            initial_message = self._game_state_message(
-                self.observe(), prefix_content="You may now begin playing.\n", memory_listing=self.memory_listing()
-            )
+            initial_message = self._game_state_message(self.observe(), prefix_content=START_STEP_PREFIX)
             self.message_history = [initial_message]
 
     # ----- durable conversation -----------------------------------------------------------------------------------
@@ -72,8 +87,7 @@ class SimpleAgent(BaseAgent):
         self.message_history = json.loads((directory / "conversation.json").read_text())["message_history"]
         resumed = self._game_state_message(
             self.observe(),
-            prefix_content="Resumed from a saved checkpoint. Time to take your next action!",
-            memory_listing=self.memory_listing(),
+            prefix_content=RESUME_STEP_PREFIX,
         )
         # Replace the checkpoint's last observation with a fresh one (or add one after a partial step).
         if self.message_history and self.message_history[-1].get("role") == "user":
@@ -86,7 +100,6 @@ class SimpleAgent(BaseAgent):
     def _game_state_message(
         observation: GameObservation,
         prefix_content: str | None = None,
-        memory_listing: str | None = None,
         suffix_content: str | None = None,
     ) -> ChatCompletionUserMessageParam:
         """Build a Chat Completions user message with the screenshot and game state."""
@@ -96,21 +109,39 @@ class SimpleAgent(BaseAgent):
         content_parts.append(
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{observation.screenshot_b64}"}}
         )
-        for section in BaseAgent.game_state_sections(observation, memory_listing):
+        for section in BaseAgent.game_state_sections(observation):
             content_parts.append({"type": "text", "text": section})
         if suffix_content:
             content_parts.append({"type": "text", "text": suffix_content})
         return {"role": "user", "content": content_parts}
 
-    def _execute_tool_call(self, tool_call: ChatCompletionMessageToolCall) -> ChatCompletionToolMessageParam:
-        """Execute an OpenAI-format tool call and return the tool result message."""
+    def _execute_tool_call(
+        self, tool_call: ChatCompletionMessageToolCall
+    ) -> tuple[ChatCompletionToolMessageParam, bool]:
+        """Execute an OpenAI-format tool call; return the tool result message and whether the call failed."""
         try:
             arguments = json.loads(tool_call.function.arguments or "{}")
         except json.JSONDecodeError as e:
             result = f"Error: tool arguments are not valid JSON ({e}); no action was taken."
-            return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+            return {"role": "tool", "tool_call_id": tool_call.id, "content": result}, True
         result = self.run_tool(tool_call.function.name, arguments)
-        return {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+        failed = isinstance(result, ToolError)
+        if isinstance(result, ToolOutput):
+            # Tool messages here can only carry text, so screenshots can't be shown to this agent.
+            result = f"{result.text}\n(Images can't be shown in tool results for this agent.)"
+        return {"role": "tool", "tool_call_id": tool_call.id, "content": str(result)}, failed
+
+    def _refusal(self, tool_calls: list, index: int, failed: str | None) -> str | None:
+        """Why tool_calls[index] must not run, or None: calls run in order, the first failure stops the rest, and a game
+        action must be a response's last call."""
+        game_actions = {name for name, tool in self.tool_factory.tools.items() if tool.ends_turn}
+        if any(call.function.name in game_actions for call in tool_calls[:index]):
+            return AFTER_GAME_ACTION_REFUSAL
+        if failed:
+            return AFTER_FAILURE_REFUSAL.format(failed=failed)
+        if tool_calls[index].function.name in game_actions and index != len(tool_calls) - 1:
+            return GAME_ACTION_NOT_LAST_REFUSAL
+        return None
 
     def _emit_usage(self, usage):
         input_tokens = getattr(usage, "input_tokens", None) or getattr(usage, "prompt_tokens", None)
@@ -170,19 +201,25 @@ class SimpleAgent(BaseAgent):
 
                 # Process tool calls
                 tool_calls = response.tool_calls
-                for tool_call in tool_calls:
-                    logger.info(f"[Tool] Using tool {tool_call.function.name} with args {tool_call.function.arguments}")
-                    tool_call_result = self._execute_tool_call(tool_call)
+                failed = None
+                for index, tool_call in enumerate(tool_calls):
+                    name = tool_call.function.name
+                    logger.info(f"[Tool] Using tool {name} with args {tool_call.function.arguments}")
+                    if refusal := self._refusal(tool_calls, index, failed):
+                        self.report_not_run(name, tool_call.function.arguments, refusal)
+                        tool_call_result = {"role": "tool", "tool_call_id": tool_call.id, "content": refusal}
+                        call_failed = True
+                    else:
+                        tool_call_result, call_failed = self._execute_tool_call(tool_call)
+                    failed = failed or (name if call_failed else None)
                     self.message_history.append(tool_call_result)  # type: ignore
-                    self._save_web_screenshot()
                 if not tool_calls:
                     logger.info("[No Tool] No tool calls made")
 
                 # Add new user message with screenshot and memory info
                 user_message = self._game_state_message(
                     self.observe(),
-                    prefix_content="Time to take your next action!",
-                    memory_listing=self.memory_listing(),
+                    prefix_content=STEP_PREFIX,
                 )
                 self.message_history.append(user_message)
 
@@ -241,7 +278,6 @@ class SimpleAgent(BaseAgent):
         user_message = self._game_state_message(
             self.observe(),
             prefix_content=prefix_content,
-            memory_listing=self.memory_listing(),
             suffix_content=suffix_content,
         )
 
@@ -249,7 +285,6 @@ class SimpleAgent(BaseAgent):
         self.message_history = [user_message]
 
         logger.info("[Agent] Message history condensed into summary.")
-        self._save_web_screenshot()
 
 
 def _jsonable(item):

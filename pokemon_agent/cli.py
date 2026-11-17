@@ -72,22 +72,20 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="Resume a run folder from its latest checkpoint")
     parser.add_argument("--runs-dir", type=str, default="runs", help="Where new run folders go (default: runs)")
     parser.add_argument(
-        "--web-output", action="store_true", help="Save latest screenshots to ./web_output/ for web viewing"
+        "--text-map",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Give the model a text-based map of the screen each step (default: on, or a resumed run's setting)",
     )
 
     parser.add_argument(
         "--observe",
         action="store_true",
-        help="Serve a live observer page (game, audio, model log, inputs, party, memory) while the agent runs",
+        help="Serve a live observer page (game, audio, model log, tool stats, party, memory) while the agent runs",
     )
     parser.add_argument("--observe-port", type=int, default=8765, help="Port for the observer page (default: 8765)")
 
     args = parser.parse_args()
-
-    # Validate conflicting arguments
-    if args.web_output and args.display:
-        logger.error("Cannot use both --display and --web-output flags simultaneously.")
-        sys.exit(1)
 
     if args.resume and args.load_state:
         parser.error("--resume and --load-state can't be combined")
@@ -101,47 +99,6 @@ def main():
         print("Place the ROM in the root directory or specify its path with --rom.")
         return
 
-    # Set up web output directory if needed
-    web_output_dir = None
-    if args.web_output:
-        web_output_dir = "web_output"
-        try:
-            os.makedirs(web_output_dir, exist_ok=True)
-            logger.info(f"Web output mode enabled. Screenshots will be saved to {web_output_dir}/latest.png")
-        except OSError as e:
-            logger.error(f"Failed to create web output directory {web_output_dir}: {e}")
-            sys.exit(1)
-
-    # Every run is durable: it gets a run folder with checkpoints, and --resume continues it.
-    if args.resume:
-        try:
-            run = RunStore.open(args.resume)
-        except FileNotFoundError as e:
-            parser.error(str(e))
-        meta = run.meta
-        if args.agent and args.agent != meta["agent"]:
-            parser.error(f"{args.resume} is a {meta['agent']!r} run; it can't be resumed as {args.agent!r}")
-        if args.model and args.model != meta.get("model"):
-            parser.error(f"{args.resume} uses model {meta.get('model')!r}; it can't be resumed with {args.model!r}")
-        args.agent, args.model = meta["agent"], meta.get("model")
-        args.steps = args.steps or meta.get("steps", 250)
-        run.update_meta(steps=args.steps)
-        checkpoint = run.latest_checkpoint()
-        if not checkpoint:
-            parser.error(f"{args.resume} has no complete checkpoint to resume")
-        resume_seq = json.loads((checkpoint / "checkpoint.json").read_text()).get("observer_seq")
-    else:
-        args.agent = args.agent or "simple"
-        args.steps = args.steps or 250
-        run = RunStore.create(
-            args.runs_dir,
-            {"agent": args.agent, "model": _effective_model(args), "steps": args.steps, "load_state": args.load_state},
-        )
-        resume_seq = None
-
-    # The hub records the run's event history even without --observe, so a later --observe shows the whole run.
-    observer = ObserverHub(event_log=run.events_path, resume_seq=resume_seq)
-
     # Create and run agent
     agent = AGENT_BUILDERS[args.agent](
         args,
@@ -150,10 +107,10 @@ def main():
         sound=args.sound if args.display else False,
         save_every=args.save_every,
         load_state=args.load_state,
-        web_output_dir=web_output_dir,
         observer=observer,
         run=run,
         resume=bool(args.resume),
+        text_map=args.text_map,
     )
     print(f"\nRun folder: {run.root} (resume with --resume {run.root})\n", flush=True)
 

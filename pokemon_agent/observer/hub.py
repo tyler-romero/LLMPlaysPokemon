@@ -21,7 +21,6 @@ from PIL import Image
 FRAME_FPS = 30
 AUDIO_DOWNSAMPLE = 2  # 48 kHz from PyBoy -> 24 kHz to the browser
 LOG_HISTORY = 400
-INPUT_HISTORY = 200
 SUBSCRIBER_QUEUE_SIZE = 2000
 
 
@@ -45,9 +44,12 @@ class ObserverHub:
         self.run: dict[str, Any] = {}
         self.state: dict[str, Any] = {}
         self.memory_listing: str = ""
+        self.memory_updated: dict[str, float] = {}
+        self.objective: dict[str, Any] | None = None  # the model's latest objective (long, medium, and short term), with its turn
         self.log: deque[dict] = deque(maxlen=LOG_HISTORY)
-        self.inputs: deque[dict] = deque(maxlen=INPUT_HISTORY)
-        self.input_count = 0
+        # Per-tool totals for the whole run: {name: {"calls", "failed", "last" (turn of the latest call)}}.
+        self.tool_stats: dict[str, dict[str, int]] = {}
+        self._tool_names: dict[Any, str] = {}  # call id -> tool name, until its result arrives
         self.step = 0
         self.audio_sample_rate = 48_000 // AUDIO_DOWNSAMPLE
 
@@ -90,6 +92,8 @@ class ObserverHub:
         """Record an event and broadcast it to every connected page."""
         with self._lock:
             self._seq += 1
+            if kind == "objective":
+                data.setdefault("turn", self.step + 1)  # the step in progress
             event = {"seq": self._seq, "t": time.time(), "kind": kind, **data}
             self._apply(event)
             if self._event_log:
@@ -114,9 +118,18 @@ class ObserverHub:
             self.state = data["state"]
         elif kind == "memory":
             self.memory_listing = data["listing"]
-        elif kind == "input":
-            self.input_count += 1
-            self.inputs.append(event)
+            self.memory_updated = data.get("updated") or {}
+        elif kind == "tool":
+            stats = self.tool_stats.setdefault(data["name"], {"calls": 0, "failed": 0, "last": 0})
+            stats["calls"] += 1
+            stats["last"] = self.step + 1
+            self._tool_names[data.get("id")] = data["name"]
+        elif kind == "tool_result":
+            name = self._tool_names.pop(data.get("id"), None)
+            if name and data.get("ok") is False:
+                self.tool_stats[name]["failed"] += 1
+        elif kind == "objective":
+            self.objective = data
         elif kind == "step":
             self.step = data["step"]
         if kind in LOGGED_KINDS:
@@ -131,9 +144,6 @@ class ObserverHub:
             if sound is not None and len(sound):
                 self._audio_chunks.append(sound[::AUDIO_DOWNSAMPLE].copy())
 
-    def on_button(self, button: str, wait: bool):
-        self.publish("input", button=button, wait=wait, step=self.step + 1)
-
     # ----- subscribers ----------------------------------------------------------------------------------------------
 
     def subscribe(self) -> tuple[Subscriber, dict]:
@@ -147,9 +157,11 @@ class ObserverHub:
                 "run": self.run,
                 "state": self.state,
                 "memory": self.memory_listing,
+                "memoryUpdated": self.memory_updated,
+                "objective": self.objective,
                 "log": list(self.log),
-                "inputs": list(self.inputs),
-                "inputCount": self.input_count,
+                # Copied under the lock, so the totals match this snapshot's seq even as later tool events arrive.
+                "toolStats": {name: dict(stats) for name, stats in self.tool_stats.items()},
                 "step": self.step,
                 "frame": self._last_frame_b64 or _encode_frame(self._frame),
                 "audioSampleRate": self.audio_sample_rate,
@@ -212,4 +224,7 @@ def _encode_frame(frame: np.ndarray | None) -> str | None:
     return base64.b64encode(buffer.getvalue()).decode()
 
 
-LOGGED_KINDS = {"thought", "tool", "tool_result", "summary", "notice", "step", "run_start", "run_end", "checkpoint"}
+LOGGED_KINDS = {
+    "thought", "tool", "tool_result", "summary", "notice", "step", "run_start", "run_end", "checkpoint", "subagent",
+    "objective", "prompt",
+}

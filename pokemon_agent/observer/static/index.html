@@ -10,31 +10,12 @@
 <link rel="stylesheet" href="/observer.css">
 </head>
 <body>
-<!--
-THESIS: The observer speaks Pokémon Red's own interface: model turns arrive as dialogue boxes, the team is the
-party screen, each action is narrated like battle text. Refuses the dark stream overlay of panels and cards.
-OWN-WORLD: Game Boy paper #f8f8f0 and ink #181818, HP green/yellow/red as the only color; double-ruled notched
-text-box frames on the 8px tile grid; rank by inverted black plates and the ▶ cursor; one pixel type size.
-STORY: The researcher glances over from the terminal and sees what the model just did, why, how fast it is going,
-whether it is stuck, and the state of its team and memory.
-FIRST VIEWPORT: Black status plate across the top; game at integer scale on the left with the narration box under
-it; the dialogue log fills the right; inputs and the party screen sit under the game.
-FORM: Pokémon Red field kit, position 4 on the ordered list, seed key 31eec541.
-FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance
--->
 <svg class="sprites" aria-hidden="true" focusable="false">
-  <symbol id="i-up" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M6 1h4v5H6z" fill="currentColor"/></symbol>
-  <symbol id="i-down" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M6 10h4v5H6z" fill="currentColor"/></symbol>
-  <symbol id="i-left" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M1 5h5v6H1z" fill="currentColor"/></symbol>
-  <symbol id="i-right" viewBox="0 0 16 16"><path d="M6 1h4v4h5v6h-5v4H6v-4H1V5h5z" fill="currentColor"/><path d="M7 2h2v4h5v4H9v4H7v-4H2V6h5z" style="fill: var(--icon-lit)"/><path d="M10 5h5v6h-5z" fill="currentColor"/></symbol>
-  <symbol id="i-a" viewBox="0 0 16 16"><path d="M5 1h6v1h2v2h1v2h1v4h-1v2h-1v2h-2v1H5v-1H3v-2H2v-2H1V6h1V4h1V2h2z" fill="currentColor"/><path d="M7 4h2v1h1v2h1v5H9v-2H7v2H5V7h1V5h1zm0 2v2h2V6z" style="fill: var(--icon-lit)"/></symbol>
-  <symbol id="i-b" viewBox="0 0 16 16"><path d="M5 1h6v1h2v2h1v2h1v4h-1v2h-1v2h-2v1H5v-1H3v-2H2v-2H1V6h1V4h1V2h2z" fill="currentColor"/><path d="M5 4h5v1h1v2h-1v1h1v3h-1v1H5zm2 2v1h2V6zm0 3v1h2V9z" style="fill: var(--icon-lit)"/></symbol>
-  <symbol id="i-start" viewBox="0 0 16 16"><path d="M3 4h10v1h1v6h-1v1H3v-1H2V5h1z" fill="currentColor"/><path d="M6 6h1v1h1v1h1v1H8v1H7v1H6z" style="fill: var(--icon-lit)"/></symbol>
-  <symbol id="i-select" viewBox="0 0 16 16"><path d="M3 4h10v1h1v6h-1v1H3v-1H2V5h1z" fill="currentColor"/><path d="M5 6h6v1H5zm0 2h6v1H5zm0 2h4v1H5z" style="fill: var(--icon-lit)"/></symbol>
   <symbol id="i-cursor" viewBox="0 0 8 8"><path d="M1 0h1v1h1v1h1v1h1v2H4v1H3v1H2v1H1z"/></symbol>
   <symbol id="i-tool-pending" viewBox="0 0 8 8"><path d="M1 3h2v2H1zm4 0h2v2H5z"/></symbol>
   <symbol id="i-tool-ok" viewBox="0 0 8 8"><path d="M0 4h2v1H0zm1 1h2v1H1zm1 1h2v1H2zm2-1h2v1H4zm1-1h2v1H5zm1-1h2v1H6zm1-1h1v1H7z"/></symbol>
   <symbol id="i-tool-failed" viewBox="0 0 8 8"><path d="M1 1h2v1H1zm4 0h2v1H5zM2 2h2v1H2zm2 0h2v1H4zM3 3h2v2H3zM2 5h2v1H2zm2 0h2v1H4zM1 6h2v1H1zm4 0h2v1H5z"/></symbol>
+  <symbol id="i-photo" viewBox="0 0 8 8"><path fill-rule="evenodd" d="M0 1h8v6H0zM1 2v4h6V2z"/><path d="M2 5h1V4h1v1h1V3h1v3H2z"/></symbol>
   <symbol id="i-more" viewBox="0 0 8 8"><path d="M0 2h7v1H6v1H5v1H4v1H3V5H2V4H1V3H0z"/></symbol>
   <symbol id="i-sound-on" viewBox="0 0 16 16"><path d="M2 6h3l4-4h1v12H9l-4-4H2z"/><path d="M12 4h1v1h1v6h-1v1h-1v-1h1V5h-1z"/></symbol>
   <symbol id="i-sound-off" viewBox="0 0 16 16"><path d="M2 6h3l4-4h1v12H9l-4-4H2z"/><path d="M11 5h1v1h1V5h1v1h-1v1h1v1h-1v1h1v1h-1V9h-1v1h-1V9h1V8h-1V7h1V6h-1z"/></symbol>
@@ -68,6 +49,17 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     </div>
   </section>
 
+  <section class="objective" aria-labelledby="objective-title">
+    <h2 class="label" id="objective-title"><span>OBJECTIVE</span><span class="label__aside" id="objective-age"></span></h2>
+    <div class="objective__body" id="objective-body" hidden>
+      <p class="objective__term" id="objective-medium-term">Medium term</p>
+      <p class="objective__medium" id="objective-medium"></p>
+      <p class="objective__term">Short term</p>
+      <p class="objective__short" id="objective-short"></p>
+    </div>
+    <p class="empty" id="objective-empty">No objective stated yet.</p>
+  </section>
+
   <section class="party" aria-labelledby="party-title">
     <h2 class="label" id="party-title"><span>PARTY</span><span class="label__aside" id="party-count"></span></h2>
     <ol class="party__list" id="party"></ol>
@@ -98,13 +90,29 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
     </p>
   </section>
 
-  <section class="inputs" aria-labelledby="inputs-title">
-    <h2 class="label" id="inputs-title"><span>INPUTS</span><span class="label__aside num" id="input-count">0</span></h2>
-    <ol class="inputs__roll" id="inputs" aria-live="off"></ol>
-    <p class="empty" id="inputs-empty">No buttons pressed yet.</p>
+  <section class="tools" aria-labelledby="tools-title">
+    <h2 class="label" id="tools-title">
+      <span>TOOLS</span>
+      <span class="tools__aside">
+        <button class="tools__defs" id="tool-defs" type="button" hidden aria-haspopup="dialog" title="See every tool's definition: what the model is told it does, and its arguments">DEFS</button>
+        <span class="label__aside num" id="tool-count" title="Tool calls this run">0</span>
+      </span>
+    </h2>
+    <div class="tools__scroll">
+      <table class="tools__table" id="tools-table" hidden>
+        <thead>
+          <tr>
+            <th scope="col">Tool</th>
+            <th scope="col" class="num" title="Calls this run">Calls</th>
+            <th scope="col" class="num" title="Share of calls that failed">Fail</th>
+            <th scope="col" class="num" title="Turns since the last call">Ago</th>
+          </tr>
+        </thead>
+        <tbody id="tools"></tbody>
+      </table>
+    </div>
+    <p class="empty" id="tools-empty">No tool calls yet.</p>
   </section>
-
-
 
   <section class="memory" aria-labelledby="memory-title">
     <h2 class="label" id="memory-title"><span>MEMORY</span><span class="label__aside">/memories</span></h2>
@@ -120,6 +128,16 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
   </section>
   </div>
 </div>
+
+<dialog class="defs" id="defs" aria-labelledby="defs-title">
+  <h2 class="label" id="defs-title">
+    <span>TOOL DEFINITIONS</span>
+    <button class="defs__close" id="defs-close" type="button" aria-label="Close">CLOSE</button>
+  </h2>
+  <p class="defs__intro" id="defs-intro"></p>
+  <nav class="defs__nav" id="defs-nav" aria-label="Tools"></nav>
+  <div class="defs__body" id="defs-body"></div>
+</dialog>
 
 <script src="/observer.js" defer></script>
 </body>

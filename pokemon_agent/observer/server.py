@@ -10,7 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from pokemon_agent.memory.store import MemoryStore
+from pokemon_agent.memory.store import MemoryImage, MemoryStore
 from pokemon_agent.observer.hub import ObserverHub
 
 logger = logging.getLogger(__name__)
@@ -59,8 +59,11 @@ def _make_handler(hub: ObserverHub, memory: MemoryStore):
             self._send(HTTPStatus.OK, target.read_bytes(), content_type)
 
         def _memory_file(self, path: str):
-            result = memory.execute("view", {"path": path, "forceReadLargeFiles": True})
-            self._send(HTTPStatus.OK, result.encode(), "text/plain; charset=utf-8")
+            result = memory.execute("view", {"path": path}, full=True)
+            if isinstance(result, MemoryImage):
+                self._send(HTTPStatus.OK, result.png, "image/png")
+            else:
+                self._send(HTTPStatus.OK, result.encode(), "text/plain; charset=utf-8")
 
         def _stream_events(self):
             subscriber, snapshot = hub.subscribe()

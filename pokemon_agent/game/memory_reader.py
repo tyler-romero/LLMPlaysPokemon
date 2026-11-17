@@ -995,6 +995,32 @@ class PokemonRedReader:
         tileset_id = self.memory[0xD367]
         return Tileset(tileset_id).name.replace("_", " ")
 
+    def read_game_started(self) -> bool:
+        """Has the player taken control in the game world? The play-time counter (wd732 bit 0) starts then."""
+        return bool(self.memory[0xD732] & 1)
+
+    def read_sprite_cells(self) -> set[tuple[int, int]]:
+        """Map (x, y) cells occupied by the current map's visible NPC and object sprites.
+
+        Slots 1-15 of wSpriteStateData1 (C1x0) / wSpriteStateData2 (C2x0); slot 0 is the player. C1x0 is the picture ID
+        (0 = unused slot), C1x2 is the image index ($FF = hidden or off screen), C1x3/C1x5 are the Y/X step while walking,
+        and C2x4/C2x5 are the map Y/X plus 4. The map position updates when a step starts, so a walking sprite also
+        blocks the cell it is leaving.
+        """
+        cells = set()
+        for slot in range(1, 16):
+            state1, state2 = 0xC100 + slot * 16, 0xC200 + slot * 16
+            if not self.memory[state1] or self.memory[state1 + 2] == 0xFF:
+                continue
+            x, y = self.memory[state2 + 5] - 4, self.memory[state2 + 4] - 4
+            cells.add((x, y))
+            step_y, step_x = self.memory[state1 + 3], self.memory[state1 + 5]
+            dx = -1 if step_x == 0xFF else step_x
+            dy = -1 if step_y == 0xFF else step_y
+            if dx or dy:
+                cells.add((x - dx, y - dy))
+        return cells
+
     def read_coordinates(self) -> tuple[int, int]:
         """Read player's current X,Y coordinates"""
         return (self.memory[0xD362], self.memory[0xD361])
@@ -1194,12 +1220,21 @@ class PokemonRedReader:
 
         text = "\n".join(text_lines)
 
+        # Black tiles (0xFF) fill the buffer during screen wipes like the battle start, and read as the digit 9.
+        if text and set(text) <= {"9", " ", "\n"}:
+            return ""
+
         # Post-process for name entry context
         if "lower case" in text.lower() or "UPPER CASE" in text:
             # We're in name entry, replace ♭ with ED
             text = text.replace("♭", "ED\n")
 
         return text
+
+    def read_screen_wipe_fraction(self) -> float:
+        """Fraction of the screen's tile buffer (C3A0-C507) holding the black tile 0xFF, as during the battle-start wipe."""
+        buffer = [self.memory[addr] for addr in range(0xC3A0, 0xC508)]
+        return buffer.count(0xFF) / len(buffer)
 
     def read_pokedex_caught_count(self) -> int:
         """Read how many unique Pokemon species have been caught"""

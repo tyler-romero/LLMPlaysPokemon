@@ -73,11 +73,23 @@ class RunStore:
         _write_json(self.root / "run.json", {**self.meta, **changes})
 
     def latest_checkpoint(self) -> Path | None:
+        """The checkpoint `latest` names, or, if it's missing or incomplete (a crash while saving), the newest complete
+        one."""
         pointer = self.root / LATEST
-        if not pointer.is_file():
-            return None
-        checkpoint = self.checkpoints / pointer.read_text().strip()
-        return checkpoint if (checkpoint / "checkpoint.json").is_file() else None
+        if pointer.is_file():
+            checkpoint = self.checkpoints / pointer.read_text().strip()
+            if (checkpoint / "checkpoint.json").is_file():
+                return checkpoint
+        complete = [path for path in self._complete() if (path / "checkpoint.json").is_file()]
+        if complete:
+            logger.warning(f"{pointer} doesn't name a complete checkpoint; using {complete[-1].name}")
+        return complete[-1] if complete else None
+
+    def _complete(self) -> list[Path]:
+        """Checkpoint directories in step order (hidden temp and replaced ones excluded)."""
+        if not self.checkpoints.is_dir():
+            return []
+        return sorted(p for p in self.checkpoints.iterdir() if p.is_dir() and not p.name.startswith("."))
 
     def checkpoint(self, step: int, write: Callable[[Path], dict], keep_last: int = 5, keep_every: int = 100) -> Path:
         """Write a checkpoint atomically: `write(dir)` fills a temp dir and returns extra metadata; the directory is
@@ -90,18 +102,24 @@ class RunStore:
         info = write(tmp) or {}
         _write_json(tmp / "checkpoint.json", {"step": step, "saved_at": time.time(), **info})
         final = self.checkpoints / name
+        # Re-saving a step (e.g. the final save after a periodic one) moves the old copy aside rather than deleting it
+        # first, so a crash leaves at most a missing `latest` target, which latest_checkpoint() recovers from.
+        replaced = self.checkpoints / f".replaced-{name}"
+        if replaced.exists():
+            shutil.rmtree(replaced)
         if final.exists():
-            shutil.rmtree(final)
+            os.replace(final, replaced)
         os.replace(tmp, final)
         latest_tmp = self.root / f"{LATEST}.tmp"
         latest_tmp.write_text(name)
         os.replace(latest_tmp, self.root / LATEST)
+        shutil.rmtree(replaced, ignore_errors=True)
         self._prune(keep_last, keep_every)
         logger.info(f"Checkpoint saved: {final}")
         return final
 
     def _prune(self, keep_last: int, keep_every: int):
-        complete = sorted(p for p in self.checkpoints.iterdir() if p.is_dir() and not p.name.startswith("."))
+        complete = self._complete()
         recent = set(complete[-keep_last:])
         for path in complete:
             if path not in recent and (keep_every <= 0 or int(path.name) % keep_every != 0):

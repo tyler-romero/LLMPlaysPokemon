@@ -19,4 +19,4 @@ SIMPLE_AGENT_LLM = LLMConfig(
 # Settings for the "copilot" agent (GitHub Copilot SDK with a Copilot-hosted model and your Copilot login).
 # See CopilotAgentConfig in pokemon_agent/agents/copilot_config.py for all options. The model defaults to Copilot's
 # default model; choose one per run with `--model <copilot-model-id>`.
-COPILOT_AGENT = CopilotAgentConfig()
+COPILOT_AGENT = CopilotAgentConfig(reasoning_effort="xhigh")

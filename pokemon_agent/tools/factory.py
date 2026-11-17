@@ -1,14 +1,24 @@
 import logging
 
-from pokemon_agent.tools.base import Tool
-from pokemon_agent.tools.game_tools import NavigateToScreenCoordinatesTool, OnScreenKeyboardTool, PressButtonsTool
+from pokemon_agent.tools.base import Tool, ToolError, ToolOutput
+from pokemon_agent.tools.compaction_tool import TriggerCompactionTool
+from pokemon_agent.tools.game_tools import (
+    OnScreenKeyboardTool,
+    PressButtonsTool,
+)
+from pokemon_agent.tools.history_tool import HistoryTool
+from pokemon_agent.tools.objective_tool import ObjectiveTool
+from pokemon_agent.tools.subagent_tool import SubagentTool
 from pokemon_agent.memory.store import MemoryStore
 from pokemon_agent.tools.memory_tools import (
     MemoryCreateTool,
     MemoryFileTool,
     MemoryDeleteTool,
     MemoryEditTool,
+    MemoryInsertTool,
+    MemoryListTool,
     MemoryRenameTool,
+    MemorySaveScreenshotTool,
     MemoryViewTool,
 )
 
@@ -18,11 +28,17 @@ TOOL_CLASSES: dict[str, type[Tool]] = {
     tool_class.name: tool_class
     for tool_class in [
         PressButtonsTool,
-        NavigateToScreenCoordinatesTool,
         OnScreenKeyboardTool,
+        HistoryTool,
+        SubagentTool,
+        ObjectiveTool,
+        TriggerCompactionTool,
         MemoryViewTool,
+        MemoryListTool,
+        MemorySaveScreenshotTool,
         MemoryCreateTool,
         MemoryEditTool,
+        MemoryInsertTool,
         MemoryDeleteTool,
         MemoryRenameTool,
     ]
@@ -30,14 +46,19 @@ TOOL_CLASSES: dict[str, type[Tool]] = {
 
 DEFAULT_TOOL_NAMES = [
     "press_buttons",
-    "navigate_to_screen_coordinates",
     "on_screen_keyboard_input",
     "view",
+    "list",
+    "save_screenshot",
     "create",
     "edit",
+    "insert",
     "delete",
     "rename",
 ]
+
+# A helper (see SubagentTool) only reads: memory files and the main agent's history. It can't play or write.
+HELPER_TOOL_NAMES = ["view", "list", "history"]
 
 
 class ToolFactory:
@@ -61,11 +82,11 @@ class ToolFactory:
         for tool in self.tools.values():
             logger.info(f"- {tool.name}: {tool.description}")
 
-    def execute_tool(self, tool_name: str, tool_input: dict) -> str:
+    def execute_tool(self, tool_name: str, tool_input: dict) -> str | ToolOutput:
         logger.info(f"Processing tool call: {tool_name}")
         tool = self.tools.get(tool_name)
         if tool is None:
-            return f"Error: unknown tool {tool_name!r}; available tools: {', '.join(self.tools)}"
+            return ToolError(f"Error: unknown tool {tool_name!r}; available tools: {', '.join(self.tools)}")
         return tool.execute(tool_input)
 
     def get_available_tools(self):

@@ -1,27 +1,28 @@
+import base64
 import json
 import logging
-import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 
+from pokemon_agent.agents.prompts import (
+    FAILED_WRITE_NOTICE_TURNS,
+    NOTE_WRITE_TOOLS,
+    NOTES_STALE_EVERY,
+    NOTES_STALE_TURNS,
+    NOTICE_FAILED_WRITE,
+    NOTICE_NO_NOTES,
+    NOTICE_STALE,
+    NOTICE_UNVIEWED,
+)
 from pokemon_agent.game.emulator import Emulator
 from pokemon_agent.game.observation import GameObservation, get_screenshot_base64
 from pokemon_agent.memory.store import MEMORY_DIR, MEMORY_TOOL_SPECS, MemoryStore, reset_memory, snapshot_memory
 from pokemon_agent.observer.hub import ObserverHub
 from pokemon_agent.runs import RunStore, copy_tree
+from pokemon_agent.tools.base import ToolError, ToolOutput
 from pokemon_agent.tools.factory import ToolFactory
 
 logger = logging.getLogger(__name__)
-
-# Tool results that begin with one of these report a failed call (tools return errors as text for the model).
-TOOL_FAILURE_PREFIXES = (
-    "error",
-    "navigation failed",
-    "invalid",
-    "no match found",
-    "multiple matches found",
-    "path already exists",
-)
 
 
 class BaseAgent(ABC):
@@ -39,10 +40,10 @@ class BaseAgent(ABC):
         sound=False,
         save_every=100,
         load_state=None,
-        web_output_dir=None,
         observer: ObserverHub | None = None,
         run: RunStore | None = None,
         resume: bool = False,
+        text_map: bool = True,
     ):
         """Initialize the emulator and tools.
 
@@ -52,22 +53,28 @@ class BaseAgent(ABC):
             sound: Whether to enable sound
             save_every: Number of steps between save_state() calls
             load_state: Path to a saved state file to load; its memory snapshot is restored if one exists
-            web_output_dir: Directory to save latest.png for web viewing
             observer: Hub that streams the run to the observer page, if enabled
             run: Run folder for durable checkpoints (game, memory, conversation); None saves to saved_games/
             resume: Restore the run's latest checkpoint instead of starting fresh
+            text_map: Include the text-based map of the screen in each step's game state
         """
         self.observer = observer
         self.run_store = run
+        self.text_map = text_map
         self._tool_calls = 0
         self.steps_completed = 0
+        # For the turn message's notices (main agent only): failed note writes not yet redone, path -> (turn, tool),
+        # and the turn the conversation was last condensed while the notes haven't been viewed since (None: viewed).
+        self._failed_writes: dict[str, tuple[int, str]] = {}
+        self._condensed_unviewed: int | None = None
         self.resume_checkpoint: Path | None = None
+        # Who is acting, added to observer events: None for the main agent, "helper" while a subagent helper works.
+        self.actor: str | None = None
         self.emulator = Emulator(rom_path, headless, sound=sound)
         self.emulator.initialize()
 
         self.running = True
         self.save_every = save_every
-        self.web_output_dir = web_output_dir
         memory_root = str(run.memory_dir) if run else MEMORY_DIR
 
         if resume:
@@ -94,31 +101,89 @@ class BaseAgent(ABC):
             self._start_memory(load_state, memory_root)
         self.memory = MemoryStore(memory_root)
         self.tool_factory = ToolFactory(self.emulator, self.tool_names, memory=self.memory)
+        for tool in self.tool_factory.tools.values():
+            tool.emit = self.emit
 
         if observer:
             self.emulator.frame_listener = observer.on_frame
-            self.emulator.button_listener = observer.on_button
-        self._save_web_screenshot()
 
     def emit(self, kind: str, **data):
         """Publish an event to the observer page, if one is attached."""
         if self.observer:
+            if self.actor:
+                data.setdefault("actor", self.actor)
             self.observer.publish(kind, **data)
 
-    def run_tool(self, name: str, tool_input: dict) -> str:
-        """Execute a tool, reporting the call and its result to the observer."""
+    def run_tool(self, name: str, tool_input: dict, factory: ToolFactory | None = None) -> str | ToolOutput:
+        """Execute a tool (from the agent's own tools unless `factory` is given), reporting it to the observer."""
         self._tool_calls += 1
         call_id = self._tool_calls
-        self.emit("tool", id=call_id, name=name, args=tool_input)
+        shown = tool_input
+        if isinstance(narration := tool_input.get("narration"), str):
+            # A game action's narration is the model speaking to viewers: show it as its dialogue, before the action.
+            if narration.strip():
+                self.emit("thought", text=narration.strip(), narration=True, step=self.steps_completed + 1)
+            shown = {key: value for key, value in tool_input.items() if key != "narration"}
+        self.emit("tool", id=call_id, name=name, args=shown)
         try:
-            result = self.tool_factory.execute_tool(name, tool_input)
+            result = (factory or self.tool_factory).execute_tool(name, tool_input)
         except Exception as e:
             self.emit("tool_result", id=call_id, result=f"{type(e).__name__}: {e}", ok=False)
             raise
-        self.emit("tool_result", id=call_id, result=result, ok=not result.lower().startswith(TOOL_FAILURE_PREFIXES))
-        if name in MEMORY_TOOL_SPECS and name != "view":
-            self.memory_listing()
+        text = result.text if isinstance(result, ToolOutput) else result
+        # The observer shows any images exactly as the model receives them (base64 PNGs).
+        images = {"images": result.images} if isinstance(result, ToolOutput) and result.images else {}
+        self.emit("tool_result", id=call_id, result=text, ok=not isinstance(result, ToolError), **images)
+        if name in MEMORY_TOOL_SPECS and name not in ("view", "list"):
+            self.publish_memory()
+        if self.actor is None:
+            self._track_notes(name, tool_input, ok=not isinstance(result, ToolError))
         return result
+
+    def _track_notes(self, name: str, tool_input: dict, ok: bool):
+        path = tool_input.get("path")
+        if not isinstance(path, str):
+            return
+        if name == "view" and ok and not path.lower().endswith(".png"):
+            self._condensed_unviewed = None
+        elif name in NOTE_WRITE_TOOLS:
+            if ok:
+                self._failed_writes.pop(path, None)
+            else:
+                self._failed_writes[path] = (self.steps_completed + 1, name)
+
+    def notes_condensed(self):
+        """The conversation was just condensed: until a note is viewed, the turn message says so."""
+        self._condensed_unviewed = self.steps_completed + 1
+
+    def notices(self) -> list[str]:
+        """Short facts about the model's notes for the turn message, each only when it applies."""
+        turn = self.steps_completed + 1
+        lines = []
+        note_turns = self.memory.note_turns()
+        if self._condensed_unviewed is not None and note_turns:
+            lines.append(NOTICE_UNVIEWED.format(turn=self._condensed_unviewed))
+        for path, (failed_turn, tool) in sorted(self._failed_writes.items(), key=lambda item: item[1]):
+            if turn - failed_turn > FAILED_WRITE_NOTICE_TURNS:
+                del self._failed_writes[path]  # (a write the model chose not to redo shouldn't nag forever)
+                continue
+            lines.append(NOTICE_FAILED_WRITE.format(tool=tool, path=path, turn=failed_turn))
+        newest = max(note_turns.values(), default=None)
+        ago = turn - newest if newest is not None else turn - 1
+        if ago >= NOTES_STALE_TURNS and ago % NOTES_STALE_EVERY == 0:
+            if newest is None:
+                lines.append(NOTICE_NO_NOTES.format(ago=ago))
+            else:
+                latest = max(note_turns, key=note_turns.get)
+                lines.append(NOTICE_STALE.format(ago=ago, path=latest, turn=newest))
+        return lines
+
+    def report_not_run(self, name: str, args, reason: str):
+        """Show the observer a tool call the agent refused to run (the model gets `reason` as its result)."""
+        self._tool_calls += 1
+        self.emit("tool", id=self._tool_calls, name=name, args=args or {})
+        self.emit("tool_result", id=self._tool_calls, result=reason, ok=False)
+        logger.info(f"[Tool] Not run {name}: {reason}")
 
     @staticmethod
     def _start_memory(load_state: str | None, memory_root: str):
@@ -172,10 +237,9 @@ class BaseAgent(ABC):
     def restore_agent_state(self, directory: Path):
         """Restore the agent's conversation state from a checkpoint; subclasses override."""
 
-    def memory_listing(self) -> str:
-        listing = self.memory.listing()
-        self.emit("memory", listing=listing)
-        return listing
+    def publish_memory(self):
+        """Show the observer the current memory files."""
+        self.emit("memory", listing=self.memory.listing(), updated=self.memory.file_times())
 
     @staticmethod
     def game_state_sections(observation: GameObservation, memory_listing: str | None = None) -> list[str]:
@@ -197,44 +261,29 @@ class BaseAgent(ABC):
 
     def observe(self) -> GameObservation:
         """Get the annotated screenshot and game state after an action."""
-        collision_map = self.emulator.get_collision_map()
+        self.memory.turn = self.steps_completed + 1
+        self.publish_memory()
+        self.emulator.wait_for_screen_wipe()
+        collision_map = self.emulator.get_collision_map() if self.text_map else None
         screenshot = self.emulator.get_screenshot()
         screenshot_b64 = get_screenshot_base64(self.emulator, screenshot)
         memory_info, location, coords = self.emulator.get_state_from_memory()
         self.emit("state", state=memory_info)
+        # save_screenshot stores this turn's screenshot exactly as the model sees it, with where it was taken.
+        self.memory.screenshot = base64.standard_b64decode(screenshot_b64)
+        self.memory.place = f"{location} ({coords[0]},{coords[1]})" if location and coords else location
 
         logger.info("[Memory State after action]")
         logger.info(memory_info)
         if collision_map:
             logger.info(f"[Collision Map after action]\n{collision_map}")
-            with open("collision_map.txt", "w") as f:
-                f.write(collision_map)
-            logger.debug("Collision map saved to collision_map.txt")
         return GameObservation(screenshot_b64=screenshot_b64, memory_info=memory_info, collision_map=collision_map)
 
-    def _save_web_screenshot(self):
-        """Save the current screenshot to web_output_dir/latest.png if web output is enabled."""
-        if not self.web_output_dir:
-            return  # Web output not enabled
-
-        try:
-            # Get screenshot and save to file
-            screenshot = self.emulator.get_screenshot()
-            if screenshot:
-                output_file = os.path.join(self.web_output_dir, "latest.png")
-                screenshot.save(output_file)
-                logger.debug(f"Saved screenshot to {output_file}")
-            else:
-                logger.warning("Could not get screenshot for web output")
-        except Exception as e:
-            logger.error(f"Error saving screenshot for web output: {e}")
-
     def _on_step_complete(self, steps_completed: int, num_steps: int):
-        """Log progress, refresh the web screenshot, and periodically save emulator state and memory."""
+        """Log progress and periodically save emulator state and memory."""
         self.steps_completed = steps_completed
         logger.info(f"Completed step {steps_completed}/{num_steps}")
         self.emit("step", step=steps_completed, total=num_steps)
-        self._save_web_screenshot()
         if self.save_every and steps_completed % self.save_every == 0 and steps_completed > 0:
             self.save_state()
 
