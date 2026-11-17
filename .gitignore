@@ -52,11 +52,7 @@ ENV/
 # Project
 pokemon.gb
 pokemon.gb.ram
-web_output/
 saved_games/
-history.txt
-collision_map.txt
-screenshot_test.png
 
 # Copilot SDK session state
 .copilot-sdk/
@@ -65,7 +61,7 @@ screenshot_test.png
 memories/
 memories.old/
 
-# Impeccable design-tool scratch (decision pages, review captures, caches)
+# Local design-tool scratch
 .impeccable/
 
 # Durable run folders (checkpoints, memory, conversation, event history)
